@@ -14,7 +14,7 @@ pub enum EnvelopeKind {
     Pong,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     pub id: Uuid,
     pub kind: EnvelopeKind,
@@ -94,10 +94,17 @@ mod tests {
 
     #[tokio::test]
     async fn ping_has_null_payload() {
-        use uuid::Uuid;
         let id = Uuid::new_v4();
         let env = Envelope::ping(id);
         assert_eq!(env.kind, EnvelopeKind::Ping);
         assert_eq!(env.payload, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_err() {
+        let buf: &[u8] = b"not json\n";
+        let mut reader = BufReader::new(buf);
+        let result = read_envelope(&mut reader).await;
+        assert!(result.is_err());
     }
 }
