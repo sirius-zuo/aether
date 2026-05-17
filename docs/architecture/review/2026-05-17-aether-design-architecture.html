@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture Review — Aether</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #f5f5f7;
+      color: #1d1d1f;
+      line-height: 1.6;
+      display: flex;
+      min-height: 100vh;
+    }
+
+    nav {
+      width: 220px;
+      min-width: 220px;
+      background: #fff;
+      border-right: 1px solid #e5e5ea;
+      padding: 2rem 1.25rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    nav h2 {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #8e8e93;
+      margin-bottom: 1rem;
+    }
+
+    nav a {
+      display: block;
+      padding: 0.4rem 0.75rem;
+      border-radius: 6px;
+      color: #3a3a3c;
+      text-decoration: none;
+      font-size: 0.875rem;
+      margin-bottom: 0.25rem;
+      transition: background 0.15s;
+    }
+
+    nav a:hover { background: #f2f2f7; }
+
+    main {
+      flex: 1;
+      padding: 2.5rem 3rem;
+      max-width: 960px;
+    }
+
+    header {
+      margin-bottom: 2.5rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid #e5e5ea;
+    }
+
+    header h1 { font-size: 1.75rem; font-weight: 700; }
+    header p { margin-top: 0.5rem; color: #6e6e73; font-size: 0.95rem; }
+    header .meta { margin-top: 0.75rem; font-size: 0.8rem; color: #8e8e93; }
+
+    section { margin-bottom: 3rem; scroll-margin-top: 2rem; }
+
+    section h2 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 1.25rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid #e5e5ea;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e5e5ea;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.75rem; }
+    .card p { color: #3a3a3c; font-size: 0.9rem; }
+
+    .diagram-card {
+      background: #fff;
+      border: 1px solid #e5e5ea;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.25rem;
+      overflow-x: auto;
+    }
+
+    .diagram-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.4rem; }
+    .diagram-desc { color: #6e6e73; font-size: 0.85rem; margin-bottom: 1rem; }
+    .mermaid { min-height: 80px; }
+
+    .findings { display: flex; flex-direction: column; gap: 0.75rem; }
+
+    .finding {
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+      padding: 0.875rem 1rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+
+    .finding.strength { background: #f0faf4; border-left: 3px solid #30d158; }
+    .finding.concern  { background: #fffbf0; border-left: 3px solid #ff9f0a; }
+    .finding.risk     { background: #fff5f5; border-left: 3px solid #ff3b30; }
+
+    .badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .badge-strength { background: #30d158; color: #fff; }
+    .badge-concern  { background: #ff9f0a; color: #fff; }
+    .badge-risk     { background: #ff3b30; color: #fff; }
+
+    .finding-text strong { display: block; margin-bottom: 0.2rem; }
+    .finding-text p { color: #3a3a3c; }
+
+    .recommendations ol { padding-left: 1.5rem; }
+    .recommendations li { margin-bottom: 0.75rem; color: #3a3a3c; font-size: 0.9rem; }
+    .recommendations li strong { color: #1d1d1f; }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <h2>Architecture Review</h2>
+    <a href="#summary">Executive Summary</a>
+    <a href="#diagrams">Diagrams</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#security">Security</a>
+    <a href="#scalability">Scalability</a>
+    <a href="#reliability">Reliability</a>
+    <a href="#recommendations">Recommendations</a>
+  </nav>
+
+  <main>
+    <header>
+      <h1>Aether Architecture Review</h1>
+      <p>Phase 1 design review — multi-agent orchestration framework over the Envelope IPC protocol</p>
+      <p class="meta">Generated 2026-05-17 · Design Review</p>
+    </header>
+
+    <section id="summary">
+      <h2>Executive Summary</h2>
+      <div class="card">
+        <p>Aether is an independent Rust orchestration framework that composes AgentVerse single-agent processes into multi-agent DAG workflows via a neutral Envelope IPC protocol (newline-delimited JSON over stdio or Unix sockets). The architecture makes strong use of the Ports and Adapters pattern — the <code>Transport</code> trait cleanly abstracts IPC from orchestration logic, enabling a Phase 2 swap to TCP without touching the DAG engine. The primary areas to address before implementation are: bounding the Singleton request queue, adding a timeout mechanism to <code>Transport::send()</code>, splitting the Supervisor's responsibilities, and adding auth hooks to the dashboard ahead of Phase 2 management endpoints.</p>
+      </div>
+    </section>
+
+    <section id="diagrams">
+      <h2>Architecture Diagrams</h2>
+
+      <div class="diagram-card">
+        <h3>System Context</h3>
+        <p class="diagram-desc">Aether as a black box — who uses it and what it connects to.</p>
+        <div class="mermaid">
+graph TB
+    Dev["Developer\n(defines workflows, registers agents)"]
+    Viewer["Dashboard Viewer\n(browser, read-only)"]
+
+    subgraph sg-aether["Aether"]
+        CORE["aether-core"]
+        DASH["aether-dashboard"]
+    end
+
+    AV1["AgentVerse Agent A\n(OS process, --stdio)"]
+    AV2["AgentVerse Agent B\n(OS process, --socket)"]
+    AV3["AgentVerse Agent N\n(OS process, --socket)"]
+
+    Dev -->|"workflow.run(payload)"| CORE
+    Viewer -->|"HTTP GET / SSE"| DASH
+    DASH -->|"SupervisorEvent stream"| CORE
+    CORE -->|"Envelope Invoke"| AV1
+    CORE -->|"Envelope Invoke"| AV2
+    CORE -->|"Envelope Invoke"| AV3
+    AV1 -->|"Envelope Result/Error"| CORE
+    AV2 -->|"Envelope Result/Error"| CORE
+    AV3 -->|"Envelope Result/Error"| CORE
+        </div>
+      </div>
+
+      <div class="diagram-card">
+        <h3>Component Diagram</h3>
+        <p class="diagram-desc">Major internal components of aether-core and aether-dashboard and their relationships.</p>
+        <div class="mermaid">
+graph TB
+    subgraph sg-core["aether-core"]
+        WB["WorkflowBuilder\nvalidates names + cycles at build time"]
+        WF["Workflow\nentry node + Vec of Edges"]
+        DAG["DAG Engine\ntopological execution\nfan-out via spawn, fan-in via JoinSet"]
+        SUP["Supervisor\ninstance lifecycle, FailurePolicy\nhealth Ping/Pong, watch() stream"]
+        REG["AgentRegistry\nArc RwLock map: name to AgentNode"]
+        TR["Transport trait\nStdioTransport\nUnixSocketTransport"]
+        ENV["Envelope\nnewline-delimited JSON wire protocol"]
+        AF["AgentFactory trait\ncreates Transport per SpawnPolicy"]
+    end
+
+    subgraph sg-dash["aether-dashboard"]
+        AXM["axum HTTP Server"]
+        SSE["GET /events\nSSE SupervisorEvent stream"]
+        RAPI["GET /api/agents\nGET /api/workflows\nGET /api/workflows/:id/graph"]
+        HTML["Static HTML\nvanilla JS + Mermaid.js"]
+    end
+
+    AVP["AgentVerse Process\n(--stdio or --socket)"]
+
+    WB --> WF
+    WF --> DAG
+    DAG --> SUP
+    SUP --> REG
+    SUP --> AF
+    AF --> TR
+    TR --> ENV
+    ENV -->|"IPC stdin/stdout or Unix socket"| AVP
+
+    SUP -->|"broadcast SupervisorEvent"| SSE
+    REG --> RAPI
+    AXM --> SSE
+    AXM --> RAPI
+    AXM --> HTML
+        </div>
+      </div>
+
+      <div class="diagram-card">
+        <h3>Sequence Diagram — DAG Task Execution</h3>
+        <p class="diagram-desc">End-to-end flow of a single task through the DAG engine, including FailurePolicy and fan-out.</p>
+        <div class="mermaid">
+sequenceDiagram
+    actor Caller
+    participant DAG as DAG Engine
+    participant SUP as Supervisor
+    participant REG as AgentRegistry
+    participant AF as AgentFactory
+    participant TR as Transport
+    participant AP as Agent Process
+
+    Caller->>DAG: workflow.run(payload)
+    DAG->>SUP: dispatch(entry_node, Envelope Invoke)
+    SUP->>REG: get(entry_node)
+    REG-->>SUP: AgentNode with factory, spawn, failure
+
+    alt SpawnPolicy PerRequest or first Singleton or Pool
+        SUP->>AF: create()
+        AF-->>SUP: Arc dyn Transport
+    end
+
+    SUP->>TR: send(Envelope Invoke payload)
+    TR->>AP: write JSON to stdin or socket
+    AP-->>TR: Envelope Result payload
+    TR-->>SUP: Ok Envelope Result
+
+    SUP->>DAG: result received
+
+    alt Error path with retries
+        TR-->>SUP: Ok Envelope Error
+        SUP->>SUP: apply FailurePolicy retry N times
+        SUP->>TR: send(Envelope Invoke) retry
+        TR->>AP: retry
+        AP-->>TR: Envelope Result
+        TR-->>SUP: Ok Envelope Result
+    end
+
+    DAG->>DAG: evaluate outgoing edges
+
+    alt Fan-out multiple edges
+        DAG->>SUP: dispatch node_b payload
+        DAG->>SUP: dispatch node_c payload
+        Note over DAG,SUP: parallel Tokio tasks
+        SUP-->>DAG: result_b
+        SUP-->>DAG: result_c
+        DAG->>DAG: JoinSet collect array of results
+    end
+
+    alt Terminal node no outgoing edges
+        DAG-->>Caller: Outcome Success payload
+    end
+        </div>
+      </div>
+
+      <div class="diagram-card">
+        <h3>Data / Type Relationships</h3>
+        <p class="diagram-desc">Core types and their relationships across the aether-core API surface.</p>
+        <div class="mermaid">
+classDiagram
+    class Workflow {
+        +entry: String
+        +edges: Vec~Edge~
+        +run(payload) Outcome
+    }
+    class Edge {
+        +from: String
+        +to: String
+        +when: Option~Predicate~
+    }
+    class AgentNode {
+        +name: String
+        +capabilities: Vec~String~
+        +spawn: SpawnPolicy
+        +failure: FailurePolicy
+        +metadata: HashMap
+    }
+    class SpawnPolicy {
+        <<enumeration>>
+        Singleton
+        Pool(size)
+        PerRequest
+    }
+    class FailurePolicy {
+        +retries: usize
+        +restart_on_failure: bool
+        +fallback: Option~String~
+    }
+    class AgentFactory {
+        <<interface>>
+        +create() Transport
+    }
+    class Transport {
+        <<interface>>
+        +send(Envelope) Envelope
+    }
+    class Envelope {
+        +id: Uuid
+        +kind: EnvelopeKind
+        +payload: Value
+        +metadata: HashMap
+    }
+    class EnvelopeKind {
+        <<enumeration>>
+        Invoke
+        Result
+        Error
+        Ping
+        Pong
+    }
+    class Outcome {
+        <<enumeration>>
+        Success(Value)
+        Failed(node, error)
+        Timeout(node)
+    }
+    class SupervisorEvent {
+        <<enumeration>>
+        WorkflowStarted
+        WorkflowFinished
+        TaskDispatched
+        TaskCompleted
+        TaskFailed
+        AgentRestarted
+        AgentHealthCheck
+    }
+    class HealthStatus {
+        <<enumeration>>
+        Healthy
+        Degraded(reason)
+        Unreachable
+    }
+
+    Workflow "1" --> "*" Edge : contains
+    Edge --> AgentNode : references by name
+    AgentNode --> SpawnPolicy : has
+    AgentNode --> FailurePolicy : has
+    AgentNode --> AgentFactory : has
+    AgentFactory --> Transport : creates
+    Transport --> Envelope : sends and receives
+    Envelope --> EnvelopeKind : typed by
+    Workflow --> Outcome : produces
+    SupervisorEvent --> HealthStatus : carries
+        </div>
+      </div>
+
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture</h2>
+      <div class="findings">
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Ports and Adapters — Transport trait</strong>
+            <p>The <code>Transport</code> trait is a textbook port. <code>StdioTransport</code> and <code>UnixSocketTransport</code> are adapters, and Phase 2's <code>TcpTransport</code> is a third. The DAG engine never knows how agents are contacted — it only calls <code>send(Envelope)</code>. Swapping transports requires zero changes to orchestration logic.</p>
+          </div>
+        </div>
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Strong anti-corruption layer — zero shared code</strong>
+            <p>Aether and AgentVerse share no code. The Envelope protocol is the only contract, implemented independently on each side. This is a clean anti-corruption layer that lets both projects evolve without coupling.</p>
+          </div>
+        </div>
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Separation of concerns — aether-core vs aether-dashboard</strong>
+            <p>Orchestration logic and presentation are entirely separate crates. The dashboard subscribes to the Supervisor's event stream and has no direct access to workflow or registry internals. Changes to the dashboard cannot affect orchestration correctness.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Supervisor is approaching a god service</strong>
+            <p>The Supervisor owns instance lifecycle, FailurePolicy enforcement, health check Ping/Pong, and the <code>watch()</code> event stream broadcast. That is four distinct responsibilities in one component. Consider extracting an <code>InstanceManager</code> for process lifecycle so the Supervisor focuses on policy and observability.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Registry mutation during live workflows</strong>
+            <p><code>AgentRegistry</code> supports hot-swap via <code>Arc&lt;RwLock&gt;</code>. The spec doesn't define what happens to in-flight workflow instances when their node definition is replaced mid-execution. An in-flight dispatch could race with a registry update, leading to inconsistent behavior within a single workflow run.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Fan-in payload contract is implicit</strong>
+            <p>Fan-in collects branch results as a JSON array and passes it as the downstream node's payload. The downstream agent must know to expect an array rather than a single value. This is an implicit contract between the workflow author and agent implementation with no enforcement mechanism.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <section id="security">
+      <h2>Security</h2>
+      <div class="findings">
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>No network surface in Phase 1</strong>
+            <p>All agent communication in Phase 1 is over stdio pipes or Unix domain sockets — both local OS IPC mechanisms with no network exposure. The attack surface is limited to local process communication, which is a significantly smaller risk than an HTTP API.</p>
+          </div>
+        </div>
+
+        <div class="finding risk">
+          <span class="badge badge-risk">Risk</span>
+          <div class="finding-text">
+            <strong>No authentication or authorization defined</strong>
+            <p>The dashboard and <code>workflow.run()</code> entry point have no authentication mechanism. Phase 2 management endpoints (restart, pause, hot-swap agents) over a potentially network-accessible dashboard without auth would be a critical vulnerability. Auth hooks should be designed into the axum server now, even if disabled by default in Phase 1.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Envelope metadata is agent-controlled and unvalidated</strong>
+            <p>Envelope metadata is a <code>HashMap&lt;String, String&gt;</code> written by the agent process. A buggy or malicious agent could set <code>workflow_id</code>, <code>trace_id</code>, or other fields to arbitrary values that confuse the Supervisor or poison observability data. Aether should treat agent-supplied metadata as untrusted and validate or namespace it on receipt.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Unix socket file permissions unspecified</strong>
+            <p>The spec doesn't address what permissions are set on Unix socket files created by <code>UnixSocketTransport</code>. A world-readable socket allows any local process to inject Envelopes. Socket files should be created with <code>0o600</code> (owner-only) by default.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Untyped payload — no validation boundary</strong>
+            <p>The Envelope <code>payload</code> is <code>serde_json::Value</code> with no schema validation. A malformed or malicious payload from one agent is forwarded verbatim to the next. Consider validating payload structure at node boundaries, at minimum checking that the value is an object before forwarding.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <section id="scalability">
+      <h2>Scalability</h2>
+      <div class="findings">
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Fully async execution — Tokio throughout</strong>
+            <p>Fan-out branches spawn concurrent Tokio tasks, and fan-in uses <code>JoinSet</code>. The architecture handles many parallel workflows without blocking OS threads. This is a strong scalability foundation for a single-process deployment.</p>
+          </div>
+        </div>
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Phase 2 horizontal scaling seams are explicit</strong>
+            <p>The <code>Transport</code> trait, <code>AgentFactory</code>, and <code>AgentRegistry</code> discovery layer are all called out as Phase 2 extension points. Scaling out to multiple machines is an implementation swap, not an architectural change.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Singleton queue is unbounded</strong>
+            <p><code>SpawnPolicy::Singleton</code> queues requests with "never rejected" semantics. Under sustained load this queue can grow without bound, exhausting memory. A <code>max_queue_depth: Option&lt;usize&gt;</code> field on <code>Singleton</code> (or a backpressure signal to the caller) should be added.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>SupervisorEvent broadcast — slow consumer behavior undefined</strong>
+            <p>The <code>watch()</code> stream is broadcast to all subscribers. If the dashboard SSE consumer falls behind (e.g., a slow browser connection), the behavior is undefined — events may be dropped or the broadcast channel may apply backpressure to the Supervisor itself. The buffering strategy and slow-consumer policy should be specified.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>Health check interval has no bounds</strong>
+            <p>The Ping/Pong health check interval is described as "configurable" with no defaults, minimums, or maximums specified. A misconfigured short interval floods agents with health checks; a long interval means slow failure detection. Sensible defaults (e.g., 30s interval, 3 missed Pongs = unhealthy) should be defined.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <section id="reliability">
+      <h2>Reliability</h2>
+      <div class="findings">
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Declarative per-node FailurePolicy</strong>
+            <p>Retry count, restart-on-failure, and fallback routing are all first-class, per-node configuration. Workflow authors have explicit control over failure behavior at each node without writing recovery code in the orchestration layer.</p>
+          </div>
+        </div>
+
+        <div class="finding strength">
+          <span class="badge badge-strength">Strength</span>
+          <div class="finding-text">
+            <strong>Typed Outcome — no stranded errors</strong>
+            <p><code>Outcome::Success | Failed | Timeout</code> gives callers structured, matchable failure information. Callers know which node failed and why, enabling intelligent application-level recovery beyond what the FailurePolicy handles.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>No timeout on Transport::send()</strong>
+            <p><code>Transport::send()</code> has no timeout parameter or deadline. A hanging agent process (e.g., model server stalled mid-generation) blocks a Tokio task indefinitely. <code>AetherError::AgentTimeout</code> exists but the mechanism that triggers it is unspecified. A per-node <code>timeout: Duration</code> in <code>AgentNode</code> or <code>FailurePolicy</code> is needed.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>PerRequest orphan process risk</strong>
+            <p>For <code>PerRequest</code> agents, the process is dropped after receiving <code>Result</code>. If the agent does not exit cleanly (e.g., it is waiting on I/O), the child process becomes an orphan. Over many requests this accumulates zombie processes. The spec should define how Aether ensures process cleanup — SIGTERM with timeout, then SIGKILL.</p>
+          </div>
+        </div>
+
+        <div class="finding concern">
+          <span class="badge badge-concern">Concern</span>
+          <div class="finding-text">
+            <strong>No circuit breaker pattern</strong>
+            <p>If a Pool of agents is consistently failing (e.g., the underlying model server is down), Aether will retry N times per request × M concurrent requests in parallel. This amplifies load on an already-failing system. A simple in-process circuit breaker per <code>AgentNode</code> — open after K consecutive failures, half-open after a cool-down — would prevent this cascade.</p>
+          </div>
+        </div>
+
+        <div class="finding risk">
+          <span class="badge badge-risk">Risk</span>
+          <div class="finding-text">
+            <strong>Single Supervisor is a single point of failure</strong>
+            <p>The Supervisor is the sole runtime owner of all live agent instances and active workflow state. If the Aether process crashes, all in-flight workflows and agent connections are lost with no recovery path. This is acceptable for Phase 1 (no clustering), but the spec should explicitly note that workflow state is ephemeral and that callers must handle <code>Outcome::Failed</code> for crash recovery.</p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <section id="recommendations" class="recommendations">
+      <h2>Recommendations</h2>
+      <div class="card">
+        <ol>
+          <li><strong>Add timeout to AgentNode or FailurePolicy</strong> — Introduce <code>timeout: Duration</code> to <code>AgentNode</code> (or <code>FailurePolicy</code>). The DAG engine wraps each <code>Transport::send()</code> in <code>tokio::time::timeout()</code>, returning <code>AetherError::AgentTimeout</code> on expiry. This activates the existing timeout variant and prevents hung tasks.</li>
+          <li><strong>Split Supervisor into InstanceManager + Supervisor</strong> — Extract process spawn, health Ping/Pong, and lifecycle teardown into an <code>InstanceManager</code>. Keep <code>FailurePolicy</code> enforcement and the <code>watch()</code> event stream in <code>Supervisor</code>. Each component then has one clear responsibility.</li>
+          <li><strong>Add auth hooks to the dashboard now</strong> — Even if disabled by default in Phase 1, add an optional token middleware to the axum server (e.g., <code>--auth-token &lt;secret&gt;</code> flag that enables Bearer token checking on all routes). Phase 2 management endpoints need this and retrofitting auth is significantly harder than leaving the hook.</li>
+          <li><strong>Bound the Singleton request queue</strong> — Add <code>max_queue_depth: Option&lt;usize&gt;</code> to <code>SpawnPolicy::Singleton</code>. When the queue is full, return <code>Err(AetherError::WorkflowError)</code> immediately rather than queuing indefinitely. Default to <code>None</code> (unbounded) but document the risk.</li>
+          <li><strong>Define PerRequest process cleanup</strong> — Specify that on Result receipt, Aether sends SIGTERM to the child process, waits up to a configurable grace period (e.g., 5s), then sends SIGKILL. Add a <code>shutdown_grace_ms: u64</code> field to <code>FailurePolicy</code> or <code>AgentNode</code>.</li>
+          <li><strong>Namespace agent-supplied Envelope metadata</strong> — On receipt of a Result or Error Envelope, Aether should copy only known metadata keys (<code>model</code>, <code>provider</code>, <code>tokens_input</code>, <code>tokens_output</code>) from the agent-supplied metadata into the internal Envelope, discarding everything else. This prevents agents from spoofing <code>trace_id</code> or <code>workflow_id</code>.</li>
+          <li><strong>Specify Unix socket permissions</strong> — <code>UnixSocketTransport</code> should create socket files with <code>0o600</code> permissions by default (owner read/write only). Document this in the spec and make it configurable for scenarios where group access is intentional.</li>
+          <li><strong>Define fan-in payload contract explicitly</strong> — Either standardize the fan-in merge as a JSON array (document in spec), or introduce a <code>FanInReducer</code> trait that defaults to array-merge but allows custom reduction. This removes the implicit contract between workflow author and downstream agent.</li>
+        </ol>
+      </div>
+    </section>
+
+  </main>
+</body>
+</html>
