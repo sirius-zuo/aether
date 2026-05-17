@@ -25,7 +25,7 @@ Aether and AgentVerse are completely independent projects with zero shared code.
 ```
 aether/
 ├── Cargo.toml               (workspace)
-├── aether-core/             (DAG engine, Supervisor, Registry, Transport trait)
+├── aether-core/             (DAG engine, InstanceManager, Supervisor, Registry, Transport trait)
 ├── aether-dashboard/        (embedded axum server, Mermaid DAG, SSE event stream)
 └── examples/
 ```
@@ -72,6 +72,8 @@ enum EnvelopeKind {
 - `provider` — LLM provider name (set by AgentVerse)
 - `tokens_input` / `tokens_output` — token usage (set by AgentVerse)
 
+**Metadata namespacing:** Aether never trusts agent-supplied values for `trace_id`, `workflow_id`, or `node`. These are set by Aether at dispatch time via an internal dispatch table keyed on `Envelope.id` (UUID correlation). When a Result/Error arrives, Aether looks up the UUID to recover the correct context — it does not read those fields from the incoming envelope. Only the following keys are copied from the agent's response envelope into `SupervisorEvent` metadata: `model`, `provider`, `tokens_input`, `tokens_output`.
+
 ---
 
 ## Core Types (`aether-core`)
@@ -85,7 +87,7 @@ trait Transport: Send + Sync {
 }
 
 struct StdioTransport { /* manages child process stdin/stdout */ }
-struct UnixSocketTransport { path: PathBuf }
+struct UnixSocketTransport { path: PathBuf }  // socket file created with 0o600 (owner-only)
 // Phase 2:
 // struct TcpTransport { addr: SocketAddr }  // inter-machine
 ```
@@ -94,9 +96,9 @@ struct UnixSocketTransport { path: PathBuf }
 
 ```rust
 enum SpawnPolicy {
-    Singleton,           // one long-running instance; requests queue, never rejected
-    Pool { size: usize },// N long-running instances, round-robin load balancing (Phase 1)
-    PerRequest,          // fresh process per task, dropped after Result
+    Singleton { max_queue: Option<usize> }, // one long-running instance; requests queue up to max_queue (None = unbounded)
+    Pool { size: usize },                   // N long-running instances, round-robin load balancing (Phase 1)
+    PerRequest,                             // fresh process per task, cleaned up after Result
 }
 ```
 
@@ -114,13 +116,15 @@ struct FailurePolicy {
 
 ```rust
 // AgentNode is a definition, not a live instance.
-// The Supervisor manages live transports separately.
+// The Supervisor manages live transports separately via InstanceManager.
 struct AgentNode {
     name: String,
     capabilities: Vec<String>,          // e.g. ["summarize", "research"]
     factory: Arc<dyn AgentFactory>,     // creates a Transport to a new or existing agent process
     spawn: SpawnPolicy,
     failure: FailurePolicy,
+    timeout: Duration,                  // per-call timeout; triggers AetherError::AgentTimeout
+    shutdown_grace: Duration,           // SIGTERM grace period before SIGKILL (PerRequest + StdioTransport only; default: 5s)
     metadata: HashMap<String, String>,  // static info: model, provider, binary path, etc.
 }
 
@@ -190,7 +194,7 @@ The runtime executes the workflow as follows:
    - **Unconditional:** enqueue next node
    - **Conditional:** evaluate predicate against result, fire matching edge
    - **Fan-out:** spawn concurrent Tokio tasks for each matching edge
-   - **Fan-in:** `JoinSet` waits for all branches; results are collected as a JSON array `[result_a, result_b, …]` and passed as the payload to the downstream node
+   - **Fan-in:** `JoinSet` waits for all branches; results are collected as a JSON array `[result_a, result_b, …]` and passed as the payload to the downstream node. **Contract:** the array order matches edge declaration order in the `WorkflowBuilder` (deterministic, not completion order). This is a stable interface — downstream agents may index into it by position.
 6. On `Error`: apply `FailurePolicy` — retry, restart, fallback, or propagate
 7. Terminal node (no outgoing edges) → return `Outcome` to caller
 
@@ -224,11 +228,22 @@ The router node is itself an AgentVerse agent. It receives the Envelope, reasons
 
 ## Supervision
 
-The Supervisor owns the registry and all live agent instances. Responsibilities:
+The supervision layer is split into two components with distinct responsibilities:
 
-- **Instance management:** Holds live process handles for Singleton/Pool nodes. Spawns PerRequest processes per task and tears them down after Result.
-- **Health checks:** Sends `Ping` envelopes on a configurable interval. Missed `Pong` triggers `FailurePolicy`. For `StdioTransport`, process exit is the failure signal.
-- **FailurePolicy execution:** On error — retry up to N times (same instance), optionally restart via `AgentFactory`, optionally reroute to fallback node. Exhausted policy → `Outcome::Failed` to caller.
+### InstanceManager
+
+`InstanceManager` owns all live process handles. It is the only component that creates, holds, and tears down agent processes:
+
+- **Singleton/Pool:** Holds persistent `Arc<dyn Transport>` handles. Starts processes at registration time (or lazily on first use — implementation choice).
+- **PerRequest:** Spawns a fresh process per task via `AgentFactory`. After receiving a Result or Error, sends SIGTERM → waits `AgentNode::shutdown_grace` → sends SIGKILL if still running.
+- **Health probes:** Sends `Ping` envelopes on a configurable interval. Missed `Pong` marks the instance as `Unreachable`; process exit on `StdioTransport` is also a failure signal.
+- **Restart:** On `FailurePolicy::restart_on_failure`, calls `AgentFactory::create` to get a fresh transport and replaces the dead handle.
+
+### Supervisor
+
+`Supervisor` owns the registry and coordinates `InstanceManager`. It enforces workflow policy and exposes the event stream:
+
+- **FailurePolicy execution:** On error from `InstanceManager` — retry up to N times (same instance), request restart via `InstanceManager`, or reroute to fallback node. Exhausted policy → `Outcome::Failed` to caller.
 - **Observability:** Exposes `fn watch() -> impl Stream<Item = SupervisorEvent>`.
 
 ```rust
@@ -270,6 +285,13 @@ Consumers subscribe to `Supervisor::watch()` and handle `SupervisorEvent`s howev
 ## Dashboard (`aether-dashboard`)
 
 An embedded axum server. Served as a single static HTML page with vanilla JS and Mermaid.js.
+
+```rust
+struct DashboardConfig {
+    port: u16,
+    auth_token: Option<String>,  // None = no auth (Phase 1 default); Some("secret") = Bearer token required on all routes
+}
+```
 
 **Phase 1 — read-only:**
 
