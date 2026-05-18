@@ -1,4 +1,214 @@
 <!DOCTYPE html>
-<html><head><title>Aether Dashboard</title></head>
-<body><p>Aether Dashboard — loading...</p></body>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aether Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: false, theme: 'default' });</script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: #f5f5f7; color: #1d1d1f; }
+    header { background: #fff; border-bottom: 1px solid #e5e5ea;
+             padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
+    header h1 { font-size: 1.2rem; font-weight: 700; }
+    .badge { font-size: 0.7rem; background: #30d158; color: #fff;
+             padding: 0.2rem 0.5rem; border-radius: 4px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;
+           padding: 1.5rem 2rem; }
+    .panel { background: #fff; border: 1px solid #e5e5ea; border-radius: 12px;
+             padding: 1.25rem; }
+    .panel h2 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem;
+                padding-bottom: 0.5rem; border-bottom: 1px solid #e5e5ea; }
+    .panel.full-width { grid-column: 1 / -1; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; font-weight: 600; padding: 0.4rem 0.6rem;
+         background: #f5f5f7; border-bottom: 1px solid #e5e5ea; }
+    td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #f0f0f5; }
+    #event-log { height: 200px; overflow-y: auto; font-family: monospace;
+                 font-size: 0.75rem; background: #1d1d1f; color: #30d158;
+                 padding: 0.75rem; border-radius: 8px; }
+    .event-line { padding: 0.1rem 0; border-bottom: 1px solid #2c2c2e; }
+    #dag-container { min-height: 150px; overflow-x: auto; }
+    select { font-size: 0.85rem; padding: 0.3rem 0.5rem;
+             border: 1px solid #e5e5ea; border-radius: 6px; margin-bottom: 0.75rem; }
+    .status-done { color: #30d158; font-weight: 600; }
+    .status-failed { color: #ff3b30; font-weight: 600; }
+    .status-running { color: #ff9f0a; font-weight: 600; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Aether Dashboard</h1>
+  <span class="badge" id="conn-status">connecting...</span>
+</header>
+<main>
+  <div class="panel">
+    <h2>Registered Agents</h2>
+    <table id="agents-table">
+      <thead><tr>
+        <th>Name</th><th>Policy</th><th>Tokens In</th><th>Tokens Out</th>
+      </tr></thead>
+      <tbody id="agents-tbody"></tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <h2>Active Workflows</h2>
+    <table id="workflows-table">
+      <thead><tr>
+        <th>ID</th><th>Entry</th><th>Status</th>
+      </tr></thead>
+      <tbody id="workflows-tbody"></tbody>
+    </table>
+  </div>
+  <div class="panel full-width">
+    <h2>DAG Diagram</h2>
+    <label for="wf-select" style="font-size:0.85rem;margin-right:0.5rem;">Workflow:</label>
+    <select id="wf-select"><option value="">— select —</option></select>
+    <div id="dag-container"><div class="mermaid" id="dag-mermaid"></div></div>
+  </div>
+  <div class="panel full-width">
+    <h2>Event Log</h2>
+    <div id="event-log"></div>
+  </div>
+</main>
+<script>
+  // All dynamic content uses textContent or createElement — no innerHTML with untrusted data.
+
+  function makeCell(text) {
+    const td = document.createElement('td');
+    td.textContent = text;
+    return td;
+  }
+
+  function makeRow(cells) {
+    const tr = document.createElement('tr');
+    cells.forEach(text => tr.appendChild(makeCell(text)));
+    return tr;
+  }
+
+  // --- Agents panel ---
+  async function refreshAgents() {
+    const res = await fetch('/api/agents');
+    if (!res.ok) return;
+    const agents = await res.json();
+    const tbody = document.getElementById('agents-tbody');
+    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+    agents.forEach(a => {
+      tbody.appendChild(makeRow([
+        a.name,
+        a.spawn_policy,
+        String(a.tokens_in),
+        String(a.tokens_out),
+      ]));
+    });
+  }
+
+  // --- Workflows panel ---
+  const seenWorkflows = new Set();
+
+  function refreshWorkflows(workflows) {
+    const tbody = document.getElementById('workflows-tbody');
+    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+    workflows.forEach(w => {
+      const tr = makeRow([
+        w.workflow_id.slice(0, 8) + '…',
+        w.entry,
+        w.status,
+      ]);
+      tr.cells[2].className = 'status-' + w.status;
+      tbody.appendChild(tr);
+
+      // Add to DAG selector if new
+      if (!seenWorkflows.has(w.workflow_id)) {
+        seenWorkflows.add(w.workflow_id);
+        const sel = document.getElementById('wf-select');
+        const opt = document.createElement('option');
+        opt.value = w.workflow_id;
+        opt.textContent = w.workflow_id.slice(0, 8) + ' (' + w.entry + ')';
+        sel.appendChild(opt);
+      }
+    });
+  }
+
+  // --- DAG diagram ---
+  async function loadDag(workflowId) {
+    if (!workflowId) return;
+    const res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/graph');
+    if (!res.ok) return;
+    const mermaidSrc = await res.text();
+    const container = document.getElementById('dag-mermaid');
+    // Clear previous render
+    while (container.firstChild) container.removeChild(container.firstChild);
+    container.removeAttribute('data-processed');
+    // Set mermaid source via textContent (safe — Mermaid reads textContent itself)
+    container.textContent = mermaidSrc;
+    await mermaid.run({ nodes: [container] });
+  }
+
+  document.getElementById('wf-select').addEventListener('change', e => loadDag(e.target.value));
+
+  // --- Event log ---
+  const logEl = document.getElementById('event-log');
+
+  function appendEvent(text) {
+    const line = document.createElement('div');
+    line.className = 'event-line';
+    const ts = new Date().toISOString().slice(11, 23);
+    line.textContent = '[' + ts + '] ' + text;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    // Keep at most 200 lines
+    while (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
+  }
+
+  // In-memory workflow state (populated from SSE events)
+  const workflowState = {};
+
+  // --- SSE connection ---
+  const connBadge = document.getElementById('conn-status');
+
+  function connectSSE() {
+    const es = new EventSource('/events');
+
+    es.onopen = () => {
+      connBadge.textContent = 'live';
+      connBadge.style.background = '#30d158';
+    };
+
+    es.onmessage = (msg) => {
+      appendEvent(msg.data);
+      try {
+        const event = JSON.parse(msg.data);
+        if (event.WorkflowStarted) {
+          const d = event.WorkflowStarted;
+          workflowState[d.workflow_id] = { workflow_id: d.workflow_id, entry: d.entry, status: 'running' };
+          refreshWorkflows(Object.values(workflowState));
+          refreshAgents();
+        }
+        if (event.WorkflowFinished) {
+          const d = event.WorkflowFinished;
+          if (workflowState[d.workflow_id]) {
+            workflowState[d.workflow_id].status =
+              d.result.Success ? 'done' : d.result.Timeout ? 'timeout' : 'failed';
+            refreshWorkflows(Object.values(workflowState));
+          }
+          refreshAgents();
+        }
+      } catch (_) { /* non-JSON SSE keepalive — ignore */ }
+    };
+
+    es.onerror = () => {
+      connBadge.textContent = 'disconnected';
+      connBadge.style.background = '#ff3b30';
+      es.close();
+      setTimeout(connectSSE, 3000);
+    };
+  }
+
+  refreshAgents();
+  connectSSE();
+</script>
+</body>
 </html>
