@@ -1,1 +1,2 @@
-// aether-dashboard — stub, implemented in subsequent tasks
+pub mod state;
+pub use state::AppState;
