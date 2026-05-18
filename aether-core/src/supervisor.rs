@@ -10,6 +10,8 @@ use crate::{
 };
 use crate::instance_manager::InstanceManager;
 
+type TaskResult = Result<(String, Envelope, Vec<(String, String)>), AetherError>;
+
 #[derive(Debug, Clone)]
 pub enum SupervisorEvent {
     WorkflowStarted  { workflow_id: Uuid, entry: String },
@@ -30,7 +32,7 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn new(registry: AgentRegistry) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
-        let instance_manager = Arc::new(InstanceManager::new(event_tx.clone()));
+        let instance_manager = Arc::new(InstanceManager::new());
         Self { registry, instance_manager, event_tx }
     }
 
@@ -103,8 +105,7 @@ impl Supervisor {
         let mut last_output = serde_json::Value::Null;
 
         while !ready.is_empty() {
-            let mut join_set: JoinSet<Result<(String, Envelope, Vec<(String, String)>), AetherError>> =
-                JoinSet::new();
+            let mut join_set: JoinSet<TaskResult> = JoinSet::new();
 
             for (node_name, payload) in ready.drain(..) {
                 let sup_registry = self.registry.clone();

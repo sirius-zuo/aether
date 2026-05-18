@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use crate::{AetherError, AgentNode, Envelope, SpawnPolicy, Transport};
-use crate::supervisor::SupervisorEvent;
 
 pub enum NodeState {
     Singleton {
@@ -20,14 +19,18 @@ pub enum NodeState {
 
 pub struct InstanceManager {
     pub(crate) states: Mutex<HashMap<String, NodeState>>,
-    event_tx: broadcast::Sender<SupervisorEvent>,
+}
+
+impl Default for InstanceManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InstanceManager {
-    pub fn new(event_tx: broadcast::Sender<SupervisorEvent>) -> Self {
+    pub fn new() -> Self {
         Self {
             states: Mutex::new(HashMap::new()),
-            event_tx,
         }
     }
 
@@ -138,7 +141,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use async_trait::async_trait;
-    use tokio::sync::broadcast;
 
     struct EchoTransport;
 
@@ -173,8 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_per_request() {
-        let (tx, _) = broadcast::channel(16);
-        let im = InstanceManager::new(tx);
+        let im = InstanceManager::new();
         let node = mk_node("echo", SpawnPolicy::PerRequest);
         let env = Envelope::invoke(serde_json::json!({"x": 1}), HashMap::new());
         let result = im.dispatch(&node, env).await.unwrap();
@@ -183,8 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_singleton() {
-        let (tx, _) = broadcast::channel(16);
-        let im = InstanceManager::new(tx);
+        let im = InstanceManager::new();
         let node = mk_node("echo", SpawnPolicy::Singleton { max_queue: None });
         im.initialize(&node).await.unwrap();
 
@@ -197,8 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn singleton_queue_full_returns_error() {
-        let (tx, _) = broadcast::channel(16);
-        let im = InstanceManager::new(tx);
+        let im = InstanceManager::new();
         // max_queue: Some(0) → no queuing allowed
         let node = mk_node("echo", SpawnPolicy::Singleton { max_queue: Some(0) });
         im.initialize(&node).await.unwrap();
