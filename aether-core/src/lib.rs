@@ -11,7 +11,7 @@ pub use envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
 pub use error::{AetherError, Outcome};
 pub use instance_manager::InstanceManager;
 pub use registry::AgentRegistry;
-pub use supervisor::SupervisorEvent;
+pub use supervisor::{Supervisor, SupervisorEvent};
 pub use transport::{AgentFactory, Transport};
 pub use transport::{StdioFactory, StdioTransport};
 pub use transport::{UnixSocketFactory, UnixSocketTransport};
