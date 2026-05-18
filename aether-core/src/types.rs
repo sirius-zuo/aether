@@ -20,7 +20,7 @@ pub struct FailurePolicy {
     pub fallback: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum HealthStatus {
     Healthy,
     Degraded { reason: String },

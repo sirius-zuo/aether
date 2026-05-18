@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -12,12 +13,16 @@ use crate::instance_manager::InstanceManager;
 
 type TaskResult = Result<(String, Envelope, Vec<(String, String)>), AetherError>;
 
-#[derive(Debug, Clone)]
+fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_u64(d.as_millis() as u64)
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub enum SupervisorEvent {
     WorkflowStarted  { workflow_id: Uuid, entry: String },
     WorkflowFinished { workflow_id: Uuid, result: Outcome },
     TaskDispatched   { workflow_id: Uuid, node: String, envelope_id: Uuid },
-    TaskCompleted    { workflow_id: Uuid, node: String, envelope_id: Uuid, elapsed: Duration },
+    TaskCompleted    { workflow_id: Uuid, node: String, envelope_id: Uuid, #[serde(serialize_with = "serialize_duration_ms")] elapsed: Duration },
     TaskFailed       { workflow_id: Uuid, node: String, error: String, attempt: usize },
     AgentRestarted   { node: String, reason: String },
     AgentHealthCheck { node: String, status: HealthStatus },
@@ -38,6 +43,10 @@ impl Supervisor {
 
     pub fn watch(&self) -> broadcast::Receiver<SupervisorEvent> {
         self.event_tx.subscribe()
+    }
+
+    pub fn registry(&self) -> &AgentRegistry {
+        &self.registry
     }
 
     pub async fn run(&self, workflow: &Workflow, initial_payload: serde_json::Value) -> Outcome {
