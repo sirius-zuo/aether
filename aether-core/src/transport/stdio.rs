@@ -31,30 +31,26 @@ impl StdioTransport {
             inner: Arc::new(Mutex::new(StdioInner { stdin: Some(stdin), stdout, child })),
         }
     }
+
+    fn transport_err(&self, msg: impl Into<String>) -> AetherError {
+        AetherError::TransportError { node: self.node_name.clone(), message: msg.into() }
+    }
 }
 
 #[async_trait]
 impl Transport for StdioTransport {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+        // Calls are serialized by the mutex — concurrent send() calls queue up,
+        // each completing the full write→read round-trip before the next starts.
         let mut inner = self.inner.lock().await;
-        let stdin = inner.stdin.as_mut().ok_or_else(|| AetherError::TransportError {
-            node: self.node_name.clone(),
-            message: "transport is shut down".to_string(),
-        })?;
-        write_envelope(stdin, &msg).await.map_err(|e| AetherError::TransportError {
-            node: self.node_name.clone(),
-            message: e.to_string(),
-        })?;
+        let stdin = inner.stdin.as_mut()
+            .ok_or_else(|| self.transport_err("transport is shut down"))?;
+        write_envelope(stdin, &msg).await
+            .map_err(|e| self.transport_err(e.to_string()))?;
         match read_envelope(&mut inner.stdout).await {
             Ok(Some(env)) => Ok(env),
-            Ok(None) => Err(AetherError::TransportError {
-                node: self.node_name.clone(),
-                message: "agent closed connection (EOF)".to_string(),
-            }),
-            Err(e) => Err(AetherError::TransportError {
-                node: self.node_name.clone(),
-                message: e.to_string(),
-            }),
+            Ok(None) => Err(self.transport_err("agent closed connection (EOF)")),
+            Err(e) => Err(self.transport_err(e.to_string())),
         }
     }
 
@@ -85,7 +81,7 @@ impl super::AgentFactory for StdioFactory {
             .envs(&self.envs)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| AetherError::TransportError {
                 node: self.node_name.clone(),
@@ -109,5 +105,11 @@ mod tests {
     fn stdio_transport_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<StdioTransport>();
+    }
+
+    #[test]
+    fn arc_dyn_transport_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<std::sync::Arc<dyn super::super::Transport>>();
     }
 }
