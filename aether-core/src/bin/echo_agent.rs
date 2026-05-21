@@ -1,63 +1,32 @@
-// aether-core/src/bin/echo_agent.rs
-//
-// Accepts AETHER_SOCKET_PATH from the environment, binds a Unix socket,
-// skips probe connections (readiness checks that close without data),
-// handles one real Invoke/Ping, then exits.
-// This matches PerRequest spawn semantics: one process per call.
-use aether_core::envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
-use std::collections::HashMap;
-use tokio::io::BufReader;
-use tokio::net::UnixListener;
+use aether_core::{Envelope, EnvelopeKind};
+use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::{get, post}, Router};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
-    let socket_path =
-        std::env::var("AETHER_SOCKET_PATH").expect("AETHER_SOCKET_PATH must be set");
+    let port: u16 = std::env::var("AGENT_PORT")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse()
+        .unwrap_or(0);
 
-    // Remove a stale socket file from a previous (crashed) run.
-    let _ = std::fs::remove_file(&socket_path);
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .expect("failed to bind");
 
-    let listener = UnixListener::bind(&socket_path).expect("failed to bind socket");
+    println!("{}", listener.local_addr().unwrap().port());
 
-    // Accept connections until we receive a real Invoke/Ping message.
-    // Probe connections (readiness checks) close immediately without sending
-    // data; we skip those and keep accepting. Bound to 200 iterations to
-    // prevent spinning forever if the supervisor never sends a real message.
-    for _ in 0..200 {
-        let (stream, _) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(_) => break,
-        };
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+    let app = Router::new()
+        .route("/aether/invoke", post(handle_invoke))
+        .route("/health", get(handle_health));
 
-        match read_envelope(&mut reader).await {
-            Ok(None) => {
-                // Probe connection — no data sent. Keep listening.
-                continue;
-            }
-            Ok(Some(env)) => {
-                let response = match env.kind {
-                    EnvelopeKind::Ping => Envelope {
-                        id: env.id,
-                        kind: EnvelopeKind::Pong,
-                        payload: serde_json::Value::Null,
-                        metadata: HashMap::new(),
-                    },
-                    EnvelopeKind::Invoke => Envelope {
-                        id: env.id,
-                        kind: EnvelopeKind::Result,
-                        payload: env.payload,
-                        metadata: env.metadata,
-                    },
-                    _ => break,
-                };
-                let _ = write_envelope(&mut write_half, &response).await;
-                break;
-            }
-            Err(_) => break,
-        }
-    }
+    axum::serve(listener, app).await.unwrap();
+}
 
-    let _ = std::fs::remove_file(&socket_path);
+async fn handle_invoke(Json(env): Json<Envelope>) -> impl IntoResponse {
+    let response = Envelope { kind: EnvelopeKind::Result, ..env };
+    (StatusCode::OK, Json(response))
+}
+
+async fn handle_health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"status": "healthy"})))
 }

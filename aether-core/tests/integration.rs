@@ -1,49 +1,47 @@
-// aether-core/tests/integration.rs
-//
-// Integration tests for Supervisor + real echo-agent processes.
-//
-// Prerequisites: build the echo-agent binary first:
-//   cargo build --bin echo-agent
 use aether_core::{
-    AgentNode, AgentRegistry, FailurePolicy, Outcome, SpawnPolicy, SupervisorEvent,
-    Supervisor, Workflow,
+    AgentNode, AgentRegistry, Envelope, EnvelopeKind, FailurePolicy,
+    HttpAgentFactory, Outcome, SpawnPolicy, Supervisor, SupervisorEvent, Workflow,
 };
-use aether_core::transport::UnixSocketFactory;
+use axum::{extract::Json, http::StatusCode, routing::{get, post}, Router};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 
-fn echo_agent_binary() -> String {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let target = std::path::PathBuf::from(&manifest)
-        .parent().unwrap()    // workspace root
-        .join("target/debug/echo-agent");
-    target.to_string_lossy().to_string()
+async fn start_echo_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = Router::new()
+        .route("/aether/invoke", post(|Json(env): Json<Envelope>| async move {
+            let resp = Envelope { kind: EnvelopeKind::Result, ..env };
+            (StatusCode::OK, Json(resp)) as (_, _)
+        }))
+        .route("/health", get(|| async { (StatusCode::OK, Json(serde_json::json!({"status":"healthy"}))) }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://127.0.0.1:{}", port)
 }
 
-fn echo_node(name: &str) -> AgentNode {
+fn echo_node(name: &str, http_url: &str) -> AgentNode {
     AgentNode {
         name: name.to_string(),
         capabilities: vec![],
-        factory: Arc::new(UnixSocketFactory {
+        factory: Arc::new(HttpAgentFactory {
             node_name: name.to_string(),
-            command: echo_agent_binary(),
-            args: vec![],
-            envs: HashMap::new(),
-            socket_dir: std::env::temp_dir(),
+            http_url: http_url.to_string(),
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy::default(),
         timeout: Duration::from_secs(10),
-        shutdown_grace: Duration::from_secs(2),
+        shutdown_grace: Duration::from_secs(1),
         metadata: HashMap::new(),
     }
 }
 
 #[tokio::test]
 async fn single_echo_node() {
+    let url = start_echo_server().await;
     let r = AgentRegistry::new();
-    r.register(echo_node("echo"));
+    r.register(echo_node("echo", &url));
     let wf = Workflow { entry: "echo".to_string(), edges: vec![] };
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!({"test": true})).await;
@@ -55,9 +53,11 @@ async fn single_echo_node() {
 
 #[tokio::test]
 async fn chain_of_two_echo_nodes() {
+    let url1 = start_echo_server().await;
+    let url2 = start_echo_server().await;
     let r = AgentRegistry::new();
-    r.register(echo_node("first"));
-    r.register(echo_node("second"));
+    r.register(echo_node("first", &url1));
+    r.register(echo_node("second", &url2));
     let wf = Workflow::builder(&r).edge("first", "second").build().unwrap();
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!(42)).await;
@@ -68,19 +68,19 @@ async fn chain_of_two_echo_nodes() {
 }
 
 #[tokio::test]
-async fn fan_out_fan_in_with_real_processes() {
+async fn fan_out_fan_in_with_http_servers() {
+    let urls: Vec<String> = futures::future::join_all((0..4).map(|_| start_echo_server())).await;
     let r = AgentRegistry::new();
-    r.register(echo_node("intake"));
-    r.register(echo_node("left"));
-    r.register(echo_node("right"));
-    r.register(echo_node("merge"));
+    r.register(echo_node("intake", &urls[0]));
+    r.register(echo_node("left", &urls[1]));
+    r.register(echo_node("right", &urls[2]));
+    r.register(echo_node("merge", &urls[3]));
     let wf = Workflow::builder(&r)
         .edge("intake", "left")
         .edge("intake", "right")
         .edge("left", "merge")
         .edge("right", "merge")
-        .build()
-        .unwrap();
+        .build().unwrap();
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!("start")).await;
     match outcome {
@@ -94,17 +94,17 @@ async fn fan_out_fan_in_with_real_processes() {
 
 #[tokio::test]
 async fn conditional_routing_fires_matching_edge() {
+    let url_router = start_echo_server().await;
+    let url_a = start_echo_server().await;
+    let url_b = start_echo_server().await;
     let r = AgentRegistry::new();
-    r.register(echo_node("router"));
-    r.register(echo_node("path-a"));
-    r.register(echo_node("path-b"));
-
+    r.register(echo_node("router", &url_router));
+    r.register(echo_node("path-a", &url_a));
+    r.register(echo_node("path-b", &url_b));
     let wf = Workflow::builder(&r)
         .conditional("router", "path-a", |env| env.payload["route"] == "a")
         .conditional("router", "path-b", |env| env.payload["route"] == "b")
-        .build()
-        .unwrap();
-
+        .build().unwrap();
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!({"route": "a"})).await;
     assert!(matches!(outcome, Outcome::Success(_)));
@@ -112,25 +112,15 @@ async fn conditional_routing_fires_matching_edge() {
 
 #[tokio::test]
 async fn supervisor_events_are_emitted() {
+    let url = start_echo_server().await;
     let r = AgentRegistry::new();
-    r.register(echo_node("node"));
+    r.register(echo_node("node", &url));
     let wf = Workflow { entry: "node".to_string(), edges: vec![] };
     let sup = Supervisor::new(r);
     let mut rx = sup.watch();
-
     sup.run(&wf, serde_json::json!(null)).await;
-
     let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(
-        events.iter().any(|e| matches!(e, SupervisorEvent::WorkflowStarted { .. })),
-        "missing WorkflowStarted event"
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, SupervisorEvent::WorkflowFinished { .. })),
-        "missing WorkflowFinished event"
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, SupervisorEvent::TaskDispatched { .. })),
-        "missing TaskDispatched event"
-    );
+    assert!(events.iter().any(|e| matches!(e, SupervisorEvent::WorkflowStarted { .. })));
+    assert!(events.iter().any(|e| matches!(e, SupervisorEvent::WorkflowFinished { .. })));
+    assert!(events.iter().any(|e| matches!(e, SupervisorEvent::TaskDispatched { .. })));
 }

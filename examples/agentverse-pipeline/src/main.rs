@@ -1,36 +1,26 @@
 //! agentverse-pipeline — Aether + AgentVerse end-to-end example
 //!
-//! Runs a two-node pipeline where each node is a live AgentVerse agent
-//! process driven over the Unix socket protocol:
+//! Runs a two-node pipeline where each node is a live HTTP agent:
 //!
 //!   analyst ──► writer
 //!
 //! The "analyst" receives the user prompt, the "writer" receives the
 //! analyst's output and produces the final response.
 //!
-//! # Prerequisites
-//!
-//! Build the AgentVerse binary first (it must listen on AETHER_SOCKET_PATH):
-//!
-//!   cd /path/to/AgentVerse && cargo build -p agentverse-server
-//!
 //! # Run
 //!
-//!   AGENTVERSE_BIN=/path/to/AgentVerse/target/debug/agentverse \
-//!   MODEL_API_KEY=sk-...                                        \
-//!   MODEL_BASE_URL=http://localhost:9090/v1                     \
-//!   MODEL_NAME=your-model                                       \
+//!   ANALYST_URL=http://127.0.0.1:8080 \
+//!   WRITER_URL=http://127.0.0.1:8081  \
 //!   cargo run -p example-agentverse-pipeline
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use aether_core::{
-    AgentNode, AgentRegistry, FailurePolicy, Outcome, SpawnPolicy, Supervisor, Workflow,
+    AgentNode, AgentRegistry, FailurePolicy, HttpAgentFactory, Outcome, SpawnPolicy, Supervisor,
+    Workflow,
 };
-use aether_core::transport::UnixSocketFactory;
 use aether_dashboard::{AppState, DashboardConfig};
 
 use tracing::info;
@@ -45,10 +35,12 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let bin = agentverse_binary();
-    info!(path = %bin.display(), "Using AgentVerse binary");
+    let analyst_url = std::env::var("ANALYST_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let writer_url = std::env::var("WRITER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
 
-    let agent_env = agent_env();
+    info!(analyst_url = %analyst_url, writer_url = %writer_url, "Agent URLs");
 
     // ── Registry ──────────────────────────────────────────────────────────
     let registry = AgentRegistry::new();
@@ -56,35 +48,29 @@ async fn main() {
     registry.register(AgentNode {
         name: "analyst".to_string(),
         capabilities: vec!["analyze".to_string()],
-        factory: Arc::new(UnixSocketFactory {
+        factory: Arc::new(HttpAgentFactory {
             node_name: "analyst".to_string(),
-            command: bin.to_string_lossy().into_owned(),
-            args: vec![],
-            envs: agent_env.clone(),
-            socket_dir: std::env::temp_dir(),
+            http_url: analyst_url,
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy { retries: 1, ..Default::default() },
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
-        metadata: model_metadata(&agent_env),
+        metadata: HashMap::new(),
     });
 
     registry.register(AgentNode {
         name: "writer".to_string(),
         capabilities: vec!["write".to_string()],
-        factory: Arc::new(UnixSocketFactory {
+        factory: Arc::new(HttpAgentFactory {
             node_name: "writer".to_string(),
-            command: bin.to_string_lossy().into_owned(),
-            args: vec![],
-            envs: agent_env.clone(),
-            socket_dir: std::env::temp_dir(),
+            http_url: writer_url,
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy { retries: 1, ..Default::default() },
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
-        metadata: model_metadata(&agent_env),
+        metadata: HashMap::new(),
     });
 
     // ── Workflow ───────────────────────────────────────────────────────────
@@ -112,7 +98,7 @@ async fn main() {
     // ── Run ───────────────────────────────────────────────────────────────
     let prompt = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "Explain how Aether orchestrates AgentVerse agents.".to_string());
+        .unwrap_or_else(|| "Explain how Aether orchestrates agents.".to_string());
 
     println!("Prompt: {prompt}");
     println!();
@@ -141,68 +127,4 @@ async fn main() {
     println!();
     println!("Dashboard stays up for 60 s — press Ctrl-C to exit early.");
     tokio::time::sleep(Duration::from_secs(60)).await;
-}
-
-fn agentverse_binary() -> PathBuf {
-    if let Ok(p) = std::env::var("AGENTVERSE_BIN") {
-        let path = PathBuf::from(&p);
-        if path.exists() {
-            return path;
-        }
-        eprintln!("AGENTVERSE_BIN={p} does not exist");
-    }
-
-    if let Ok(path) = which_agentverse() {
-        return path;
-    }
-
-    eprintln!(
-        "Could not find the 'agentverse' binary.\n\
-         Build it first:\n\n\
-         \x20   cd /path/to/AgentVerse && cargo build -p agentverse-server\n\n\
-         Then set AGENTVERSE_BIN:\n\n\
-         \x20   AGENTVERSE_BIN=/path/to/AgentVerse/target/debug/agentverse \\\n\
-         \x20   cargo run -p example-agentverse-pipeline"
-    );
-    std::process::exit(1);
-}
-
-fn which_agentverse() -> Result<PathBuf, ()> {
-    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
-        let candidate = PathBuf::from(dir).join("agentverse");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(())
-}
-
-fn agent_env() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    for key in ["MODEL_API_KEY", "MODEL_NAME", "MODEL_BASE_URL"] {
-        if let Ok(val) = std::env::var(key) {
-            env.insert(key.to_string(), val);
-        }
-    }
-    env
-}
-
-fn model_metadata(env: &HashMap<String, String>) -> HashMap<String, String> {
-    let model = env
-        .get("MODEL_NAME")
-        .cloned()
-        .unwrap_or_else(|| "gpt-4".to_string());
-    let provider = env
-        .get("MODEL_BASE_URL")
-        .map(|url| {
-            if url.contains("anthropic") { "anthropic" }
-            else if url.contains("generativelanguage") { "gemini" }
-            else { "openai" }
-        })
-        .unwrap_or("openai")
-        .to_string();
-    HashMap::from([
-        ("model".to_string(), model),
-        ("provider".to_string(), provider),
-    ])
 }
