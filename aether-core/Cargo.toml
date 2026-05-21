@@ -21,6 +21,7 @@ chrono = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 httpmock = { workspace = true }
+tower = { workspace = true }
 
 [[bin]]
 name = "echo-agent"

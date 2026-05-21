@@ -2,6 +2,7 @@ pub mod envelope;
 pub mod error;
 pub mod instance_manager;
 pub mod registry;
+pub mod registry_server;
 pub mod registry_store;
 pub mod supervisor;
 pub mod transport;
