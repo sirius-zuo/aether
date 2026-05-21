@@ -1,5 +1,6 @@
 pub mod envelope;
 pub mod error;
+pub mod health_poller;
 pub mod instance_manager;
 pub mod registry;
 pub mod registry_server;

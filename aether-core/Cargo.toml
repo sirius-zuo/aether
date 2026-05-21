@@ -26,3 +26,7 @@ tower = { workspace = true }
 [[bin]]
 name = "echo-agent"
 path = "src/bin/echo_agent.rs"
+
+[[bin]]
+name = "aether"
+path = "src/bin/aether.rs"
