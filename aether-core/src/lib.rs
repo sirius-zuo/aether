@@ -15,5 +15,6 @@ pub use registry::AgentRegistry;
 pub use supervisor::{Supervisor, SupervisorEvent};
 pub use transport::{AgentFactory, Transport};
 pub use transport::{UnixSocketFactory, UnixSocketTransport};
+pub use transport::{HttpAgentFactory, HttpTransport};
 pub use types::{AgentNode, FailurePolicy, HealthStatus, SpawnPolicy};
 pub use workflow::{Edge, EdgePredicate, Workflow, WorkflowBuilder};

@@ -19,5 +19,7 @@ pub trait AgentFactory: Send + Sync {
 }
 
 pub mod unix;
+pub mod http;
 
 pub use unix::{UnixSocketFactory, UnixSocketTransport};
+pub use http::{HttpAgentFactory, HttpTransport};
