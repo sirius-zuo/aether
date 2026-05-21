@@ -1,7 +1,8 @@
 // aether-core/src/bin/echo_agent.rs
 //
 // Accepts AETHER_SOCKET_PATH from the environment, binds a Unix socket,
-// handles one Invoke/Ping connection, then exits.
+// skips probe connections (readiness checks that close without data),
+// handles one real Invoke/Ping, then exits.
 // This matches PerRequest spawn semantics: one process per call.
 use aether_core::envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
 use std::collections::HashMap;
@@ -20,8 +21,9 @@ async fn main() {
 
     // Accept connections until we receive a real Invoke/Ping message.
     // Probe connections (readiness checks) close immediately without sending
-    // data; we skip those and keep accepting.
-    loop {
+    // data; we skip those and keep accepting. Bound to 200 iterations to
+    // prevent spinning forever if the supervisor never sends a real message.
+    for _ in 0..200 {
         let (stream, _) = match listener.accept().await {
             Ok(conn) => conn,
             Err(_) => break,
