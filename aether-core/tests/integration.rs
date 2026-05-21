@@ -1,8 +1,14 @@
+// aether-core/tests/integration.rs
+//
+// Integration tests for Supervisor + real echo-agent processes.
+//
+// Prerequisites: build the echo-agent binary first:
+//   cargo build --bin echo-agent
 use aether_core::{
     AgentNode, AgentRegistry, FailurePolicy, Outcome, SpawnPolicy, SupervisorEvent,
     Supervisor, Workflow,
 };
-use aether_core::transport::StdioFactory;
+use aether_core::transport::UnixSocketFactory;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,11 +25,12 @@ fn echo_node(name: &str) -> AgentNode {
     AgentNode {
         name: name.to_string(),
         capabilities: vec![],
-        factory: Arc::new(StdioFactory {
+        factory: Arc::new(UnixSocketFactory {
             node_name: name.to_string(),
             command: echo_agent_binary(),
             args: vec![],
             envs: HashMap::new(),
+            socket_dir: std::env::temp_dir(),
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy::default(),

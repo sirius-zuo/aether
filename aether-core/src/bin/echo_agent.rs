@@ -18,31 +18,42 @@ async fn main() {
 
     let listener = UnixListener::bind(&socket_path).expect("failed to bind socket");
 
-    // Accept one connection, handle it, then exit.
-    if let Ok((stream, _)) = listener.accept().await {
+    // Accept connections until we receive a real Invoke/Ping message.
+    // Probe connections (readiness checks) close immediately without sending
+    // data; we skip those and keep accepting.
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(_) => break,
+        };
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        if let Ok(Some(env)) = read_envelope(&mut reader).await {
-            let response = match env.kind {
-                EnvelopeKind::Ping => Envelope {
-                    id: env.id,
-                    kind: EnvelopeKind::Pong,
-                    payload: serde_json::Value::Null,
-                    metadata: HashMap::new(),
-                },
-                EnvelopeKind::Invoke => Envelope {
-                    id: env.id,
-                    kind: EnvelopeKind::Result,
-                    payload: env.payload,
-                    metadata: env.metadata,
-                },
-                _ => {
-                    let _ = std::fs::remove_file(&socket_path);
-                    return;
-                }
-            };
-            let _ = write_envelope(&mut write_half, &response).await;
+        match read_envelope(&mut reader).await {
+            Ok(None) => {
+                // Probe connection — no data sent. Keep listening.
+                continue;
+            }
+            Ok(Some(env)) => {
+                let response = match env.kind {
+                    EnvelopeKind::Ping => Envelope {
+                        id: env.id,
+                        kind: EnvelopeKind::Pong,
+                        payload: serde_json::Value::Null,
+                        metadata: HashMap::new(),
+                    },
+                    EnvelopeKind::Invoke => Envelope {
+                        id: env.id,
+                        kind: EnvelopeKind::Result,
+                        payload: env.payload,
+                        metadata: env.metadata,
+                    },
+                    _ => break,
+                };
+                let _ = write_envelope(&mut write_half, &response).await;
+                break;
+            }
+            Err(_) => break,
         }
     }
 
