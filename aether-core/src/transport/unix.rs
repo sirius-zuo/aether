@@ -1,13 +1,19 @@
+// aether-core/src/transport/unix.rs
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
+use uuid::Uuid;
 use crate::envelope::{read_envelope, write_envelope};
 use crate::{AetherError, Envelope};
 use super::{AgentFactory, Transport};
 
+/// Connects to an agent already listening on a Unix socket.
+/// One fresh connection is opened per `send()` call.
 pub struct UnixSocketTransport {
     pub node_name: String,
     pub path: PathBuf,
@@ -16,17 +22,21 @@ pub struct UnixSocketTransport {
 #[async_trait]
 impl Transport for UnixSocketTransport {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
-        let stream = UnixStream::connect(&self.path).await.map_err(|e| AetherError::TransportError {
-            node: self.node_name.clone(),
-            message: e.to_string(),
+        let stream = UnixStream::connect(&self.path).await.map_err(|e| {
+            AetherError::TransportError {
+                node: self.node_name.clone(),
+                message: e.to_string(),
+            }
         })?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        write_envelope(&mut write_half, &msg).await.map_err(|e| AetherError::TransportError {
-            node: self.node_name.clone(),
-            message: e.to_string(),
-        })?;
+        write_envelope(&mut write_half, &msg)
+            .await
+            .map_err(|e| AetherError::TransportError {
+                node: self.node_name.clone(),
+                message: e.to_string(),
+            })?;
 
         match read_envelope(&mut reader).await {
             Ok(Some(env)) => Ok(env),
@@ -41,22 +51,60 @@ impl Transport for UnixSocketTransport {
         }
     }
 
-    async fn shutdown(&self, _grace: Duration) {
-        // External process — not owned by this transport
-    }
+    /// No-op — the process exits naturally after serving one request.
+    async fn shutdown(&self, _grace: Duration) {}
 }
 
+/// Spawns an agent process and waits for it to bind its Unix socket.
+///
+/// The process receives the socket path via the `AETHER_SOCKET_PATH` env var.
+/// `create()` polls until a connection succeeds (up to 5 s) before returning
+/// the transport, so callers can use the transport immediately.
 pub struct UnixSocketFactory {
     pub node_name: String,
-    pub path: PathBuf,
+    pub command: String,
+    pub args: Vec<String>,
+    pub envs: HashMap<String, String>,
+    /// Directory where per-invocation socket files are created.
+    pub socket_dir: PathBuf,
 }
 
 #[async_trait]
 impl AgentFactory for UnixSocketFactory {
     async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+        let socket_path = self.socket_dir.join(format!("{}.sock", Uuid::new_v4()));
+
+        tokio::process::Command::new(&self.command)
+            .args(&self.args)
+            .envs(&self.envs)
+            .env("AETHER_SOCKET_PATH", &socket_path)
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| AetherError::TransportError {
+                node: self.node_name.clone(),
+                message: format!("spawn failed: {}", e),
+            })?;
+
+        // Wait until the agent is accepting connections.
+        // Each probe opens and immediately drops a connection; the agent will see
+        // a spurious accept+disconnect on each poll iteration before the real send().
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AetherError::TransportError {
+                    node: self.node_name.clone(),
+                    message: "agent did not bind socket within 5 s".to_string(),
+                });
+            }
+            if UnixStream::connect(&socket_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
         Ok(Arc::new(UnixSocketTransport {
             node_name: self.node_name.clone(),
-            path: self.path.clone(),
+            path: socket_path,
         }))
     }
 }
@@ -69,6 +117,12 @@ mod tests {
     fn unix_transport_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<UnixSocketTransport>();
+    }
+
+    #[test]
+    fn unix_factory_spawning_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<UnixSocketFactory>();
     }
 
     #[tokio::test]
@@ -101,7 +155,6 @@ mod tests {
             }
         });
 
-        // Give listener time to bind
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let transport = UnixSocketTransport {
