@@ -83,7 +83,7 @@ impl RegistryStore {
         let caps = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "[]".to_string());
         let meta = serde_json::to_string(&entry.metadata).unwrap_or_else(|_| "{}".to_string());
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             // Same URL re-registration: remove old row first
             conn.execute(
                 "DELETE FROM agents WHERE http_url = ?1 AND instance_id != ?2",
@@ -96,7 +96,7 @@ impl RegistryStore {
                 params![entry.instance_id, entry.name, entry.http_url,
                         caps, meta, entry.registered_at],
             ).map_err(|e| e.to_string())
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })?;
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(())
     }
 
@@ -104,10 +104,10 @@ impl RegistryStore {
         let conn = Arc::clone(&self.conn);
         let id = instance_id.to_string();
         let affected = tokio::task::spawn_blocking(move || {
-            conn.lock().unwrap()
+            conn.lock().unwrap_or_else(|e| e.into_inner())
                 .execute("DELETE FROM agents WHERE instance_id = ?1", params![id])
                 .map_err(|e| e.to_string())
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })?;
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(affected > 0)
     }
 
@@ -122,38 +122,38 @@ impl RegistryStore {
         let ts = timestamp.to_string();
         let st = status.as_str().to_string();
         tokio::task::spawn_blocking(move || {
-            conn.lock().unwrap()
+            conn.lock().unwrap_or_else(|e| e.into_inner())
                 .execute(
                     "UPDATE agents SET status = ?1, last_health_check = ?2 WHERE instance_id = ?3",
                     params![st, ts, id],
                 )
                 .map_err(|e| e.to_string())
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })?;
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(())
     }
 
     pub async fn list_all(&self) -> Result<Vec<RegistrationEntry>, AetherError> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare(
                 "SELECT instance_id, name, http_url, capabilities, metadata, registered_at, last_health_check, status FROM agents"
             ).map_err(|e| e.to_string())?;
             Self::collect_entries(&mut stmt, [])
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })
     }
 
     pub async fn list_by_name(&self, name: &str) -> Result<Vec<RegistrationEntry>, AetherError> {
         let conn = Arc::clone(&self.conn);
         let n = name.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let mut stmt = conn.prepare(
                 "SELECT instance_id, name, http_url, capabilities, metadata, registered_at, last_health_check, status
                  FROM agents WHERE name = ?1"
             ).map_err(|e| e.to_string())?;
             Self::collect_entries(&mut stmt, params![n])
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })
     }
 
     pub async fn add_event(
@@ -168,13 +168,13 @@ impl RegistryStore {
         let pl = payload.to_string();
         let now = chrono::Utc::now().to_rfc3339();
         tokio::task::spawn_blocking(move || {
-            conn.lock().unwrap()
+            conn.lock().unwrap_or_else(|e| e.into_inner())
                 .execute(
                     "INSERT INTO events (instance_id, event_type, payload, received_at) VALUES (?1, ?2, ?3, ?4)",
                     params![id, et, pl, now],
                 )
                 .map_err(|e| e.to_string())
-        }).await.unwrap().map_err(|e| AetherError::RegistryError { message: e })?;
+        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(())
     }
 
