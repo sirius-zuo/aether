@@ -1,7 +1,7 @@
 //! agentverse-pipeline — Aether + AgentVerse end-to-end example
 //!
 //! Runs a two-node pipeline where each node is a live AgentVerse agent
-//! process driven over the Envelope stdio protocol:
+//! process driven over the Unix socket protocol:
 //!
 //!   analyst ──► writer
 //!
@@ -10,7 +10,7 @@
 //!
 //! # Prerequisites
 //!
-//! Build the AgentVerse binary first:
+//! Build the AgentVerse binary first (it must listen on AETHER_SOCKET_PATH):
 //!
 //!   cd /path/to/AgentVerse && cargo build -p agentverse-server
 //!
@@ -21,8 +21,6 @@
 //!   MODEL_BASE_URL=http://localhost:9090/v1                     \
 //!   MODEL_NAME=your-model                                       \
 //!   cargo run -p example-agentverse-pipeline
-//!
-//! Open http://127.0.0.1:7700 to watch the live dashboard.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,7 +30,7 @@ use std::time::Duration;
 use aether_core::{
     AgentNode, AgentRegistry, FailurePolicy, Outcome, SpawnPolicy, Supervisor, Workflow,
 };
-use aether_core::transport::StdioFactory;
+use aether_core::transport::UnixSocketFactory;
 use aether_dashboard::{AppState, DashboardConfig};
 
 use tracing::info;
@@ -50,7 +48,6 @@ async fn main() {
     let bin = agentverse_binary();
     info!(path = %bin.display(), "Using AgentVerse binary");
 
-    // Environment to pass to each agent process
     let agent_env = agent_env();
 
     // ── Registry ──────────────────────────────────────────────────────────
@@ -59,11 +56,12 @@ async fn main() {
     registry.register(AgentNode {
         name: "analyst".to_string(),
         capabilities: vec!["analyze".to_string()],
-        factory: Arc::new(StdioFactory {
+        factory: Arc::new(UnixSocketFactory {
             node_name: "analyst".to_string(),
             command: bin.to_string_lossy().into_owned(),
-            args: vec!["--stdio".to_string()],
+            args: vec![],
             envs: agent_env.clone(),
+            socket_dir: std::env::temp_dir(),
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy { retries: 1, ..Default::default() },
@@ -75,11 +73,12 @@ async fn main() {
     registry.register(AgentNode {
         name: "writer".to_string(),
         capabilities: vec!["write".to_string()],
-        factory: Arc::new(StdioFactory {
+        factory: Arc::new(UnixSocketFactory {
             node_name: "writer".to_string(),
             command: bin.to_string_lossy().into_owned(),
-            args: vec!["--stdio".to_string()],
+            args: vec![],
             envs: agent_env.clone(),
+            socket_dir: std::env::temp_dir(),
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy { retries: 1, ..Default::default() },
@@ -139,14 +138,11 @@ async fn main() {
         }
     }
 
-    // Keep the dashboard alive briefly so it can be inspected
     println!();
     println!("Dashboard stays up for 60 s — press Ctrl-C to exit early.");
     tokio::time::sleep(Duration::from_secs(60)).await;
 }
 
-/// Resolve the AgentVerse binary.
-/// Checks AGENTVERSE_BIN env var first, then looks for it on PATH.
 fn agentverse_binary() -> PathBuf {
     if let Ok(p) = std::env::var("AGENTVERSE_BIN") {
         let path = PathBuf::from(&p);
@@ -156,7 +152,6 @@ fn agentverse_binary() -> PathBuf {
         eprintln!("AGENTVERSE_BIN={p} does not exist");
     }
 
-    // Try PATH
     if let Ok(path) = which_agentverse() {
         return path;
     }
@@ -182,8 +177,6 @@ fn which_agentverse() -> Result<PathBuf, ()> {
     Err(())
 }
 
-/// Build the environment HashMap passed to each agent process.
-/// Passes MODEL_API_KEY, MODEL_NAME, MODEL_BASE_URL through from the caller's env.
 fn agent_env() -> HashMap<String, String> {
     let mut env = HashMap::new();
     for key in ["MODEL_API_KEY", "MODEL_NAME", "MODEL_BASE_URL"] {
@@ -194,14 +187,11 @@ fn agent_env() -> HashMap<String, String> {
     env
 }
 
-/// Static metadata for the AgentNode registry (model + provider labels).
 fn model_metadata(env: &HashMap<String, String>) -> HashMap<String, String> {
     let model = env
         .get("MODEL_NAME")
         .cloned()
         .unwrap_or_else(|| "gpt-4".to_string());
-    // Infer provider from base URL: Anthropic URLs contain "anthropic",
-    // Gemini URLs contain "generativelanguage" — everything else is OpenAI-compatible.
     let provider = env
         .get("MODEL_BASE_URL")
         .map(|url| {
