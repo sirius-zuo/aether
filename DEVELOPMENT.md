@@ -707,10 +707,12 @@ The planner contract is `DagSpec`, a JSON object with a `nodes` array. Each node
 | `id` | `string` | Yes | Unique within the DAG; referenced by `depends_on` |
 | `capability` | `string` | Yes* | Capability to resolve against the registry |
 | `agent` | `string` | Yes* | Optional pin to a specific agent by name (bypasses capability resolution) |
-| `depends_on` | `string[]` | Yes | IDs of upstream nodes; empty = entry node |
+| `depends_on` | `string[]` | Yes | IDs of upstream nodes; empty = entry node. A node no other node depends on is a terminal node |
 | `instruction` | `string` | No | Planner's per-node directive, carried into the Envelope metadata |
 
 `*` — exactly one of `capability` or `agent` must be set.
+
+The DAG has exactly one **entry** node (empty `depends_on`, seeded with the goal payload) and exactly one **terminal** node (depended on by nothing, whose output is the final result). A synthesizer is just a terminal node the planner chooses to emit; Aether does not special-case it.
 
 **Example:**
 
@@ -724,10 +726,12 @@ The planner contract is `DagSpec`, a JSON object with a `nodes` array. Each node
 ```
 
 Validation rules enforced by `DagSpec::validate()`:
-- Exactly one entry node (empty `depends_on`)
+- Non-empty `nodes`
 - No duplicate node IDs
 - All dependencies reference existing nodes
 - Every node has a `capability` or an `agent` pin
+- Exactly one entry node (empty `depends_on`)
+- Exactly one terminal node (no node depends on it), so the final result is unambiguous
 - Cycle detection runs at `WorkflowBuilder::build()` time
 
 ### Orchestrator

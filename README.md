@@ -220,12 +220,54 @@ GET /api/workflows → JSON array of active workflow instances
 GET /api/workflows/:id/graph → Mermaid graph TD string
 ```
 
+## LLM Planning
+
+Aether can turn a natural-language goal into a workflow at run time. A **planner** agent — registered like any other agent, with the capability `"plan"` — receives the goal and emits a DAG as JSON. Aether validates it, resolves each node to a healthy agent from the registry, builds a `Workflow`, and runs it on the `Supervisor`. `aether-core` itself stays LLM-free; the "brain" is just another agent that speaks the Envelope protocol.
+
+```rust
+use aether_core::Orchestrator;
+use aether_core::registry_store::RegistryStore;
+
+let store = RegistryStore::open("aether.db")?;
+let outcome = Orchestrator::new(store)
+    .submit(serde_json::json!({ "goal": "analyze X" }))
+    .await; // Outcome::Success(final) or Outcome::Failed — never panics
+```
+
+The planner returns a `DagSpec` — a `nodes` array where each node has an `id`, a `capability` (or pinned `agent`), `depends_on` edges, and an optional `instruction`:
+
+```json
+{
+  "nodes": [
+    { "id": "n1", "capability": "research",   "depends_on": [],     "instruction": "Find recent papers on X" },
+    { "id": "n2", "capability": "synthesize", "depends_on": ["n1"], "instruction": "Summarize findings" }
+  ]
+}
+```
+
+A valid DAG has exactly one entry node (seeded with the goal) and one terminal node (whose output is the final result). See [DEVELOPMENT.md](DEVELOPMENT.md#dag-json-schema) for the full schema and validation rules.
+
+## MCP Server
+
+`aether-mcp` exposes goal dispatch over the Model Context Protocol (JSON-RPC 2.0) so other agents can drive Aether directly. It wraps the same `Orchestrator::submit` entry point behind three tools — `submit_goal`, `get_result`, `list_capabilities` — and runs over **stdio** (default) or **HTTP**.
+
+```bash
+# stdio (default)
+cargo run -p aether-mcp --bin aether-mcp
+
+# HTTP on port 7800
+AETHER_MCP_TRANSPORT=http cargo run -p aether-mcp --bin aether-mcp
+```
+
+`submit_goal` returns a `workflow_id` immediately; poll `get_result` with it until the run completes. See [DEVELOPMENT.md](DEVELOPMENT.md#aether-mcp) for the tool surface and transport details.
+
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `aether-core` | DAG engine, HTTP transport, registry store + server, health poller, supervisor |
+| `aether-core` | DAG engine, HTTP transport, registry store + server, health poller, supervisor, LLM-planning orchestrator |
 | `aether-dashboard` | Embedded axum server, SSE event stream, Mermaid.js UI |
+| `aether-mcp` | MCP (JSON-RPC 2.0) sidecar exposing goal dispatch over stdio / HTTP |
 
 ## Binaries
 
@@ -233,6 +275,7 @@ GET /api/workflows/:id/graph → Mermaid graph TD string
 |--------|-------|-------------|
 | `aether` | `aether-core` | Standalone agent registry server with SQLite persistence and health polling |
 | `echo-agent` | `aether-core` | Test helper — echoes every Invoke as Result, responds to Ping with Pong |
+| `aether-mcp` | `aether-mcp` | MCP server bridging goal dispatch to the orchestrator (stdio / HTTP) |
 
 ## Examples
 
@@ -252,10 +295,12 @@ cargo run -p example-agentverse-pipeline -- "Your question here"
 aether/
 ├── aether-core/
 │   ├── src/
+│   │   ├── dag.rs               # DagSpec / DagNode — planner DAG JSON contract + validation
 │   │   ├── envelope.rs          # Envelope, EnvelopeKind, newline-delimited JSON codec
 │   │   ├── error.rs             # AetherError, Outcome
 │   │   ├── health_poller.rs     # Periodic GET /health checker; marks instances healthy/unhealthy
 │   │   ├── instance_manager.rs  # Connection lifecycle — Singleton/Pool/PerRequest
+│   │   ├── orchestrator.rs      # LLM-free coordinator — goal → planner → DAG → Supervisor
 │   │   ├── registry.rs          # AgentRegistry — register/get/find_capable/list
 │   │   ├── registry_server.rs   # axum router for agent self-registration REST API
 │   │   ├── registry_store.rs    # SQLite-backed persistence for agent registrations
@@ -277,6 +322,16 @@ aether/
 │   │   └── assets/index.html    # Single-page dashboard
 │   └── tests/
 │       └── server_test.rs       # Integration tests for HTTP endpoints and auth
+├── aether-mcp/
+│   ├── src/
+│   │   ├── engine.rs            # McpEngine — bridges MCP tools to the Orchestrator
+│   │   ├── job.rs               # JobStore — async submit/poll job tracking
+│   │   ├── jsonrpc.rs           # JSON-RPC 2.0 types + tool dispatch
+│   │   ├── stdio.rs             # stdio transport (line-delimited JSON-RPC)
+│   │   ├── http.rs              # HTTP transport (Streamable HTTP, JSON responses)
+│   │   └── bin/aether-mcp.rs    # MCP server binary, env-driven transport selection
+│   └── tests/
+│       └── engine.rs            # submit_goal → poll-to-completion test
 └── examples/
     └── agentverse-pipeline/     # End-to-end example with two HTTP agents
 ```
