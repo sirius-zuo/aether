@@ -2,6 +2,7 @@
 members = [
     "aether-core",
     "aether-dashboard",
+    "aether-mcp",
     "examples/agentverse-pipeline",
 ]
 resolver = "2"
