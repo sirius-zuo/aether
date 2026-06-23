@@ -1,3 +1,4 @@
+pub mod dag;
 pub mod envelope;
 pub mod error;
 pub mod health_poller;
@@ -11,6 +12,7 @@ pub mod types;
 pub mod workflow;
 
 pub use envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
+pub use dag::{DagNode, DagSpec};
 pub use error::{AetherError, Outcome};
 pub use instance_manager::InstanceManager;
 pub use registry::AgentRegistry;
