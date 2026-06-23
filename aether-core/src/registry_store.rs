@@ -19,7 +19,7 @@ impl RegistryStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "healthy" => Self::Healthy,
             "unhealthy" => Self::Unhealthy,
@@ -205,7 +205,7 @@ impl RegistryStore {
                 metadata: serde_json::from_str(&meta_str).unwrap_or_default(),
                 registered_at: reg_at,
                 last_health_check: lhc,
-                status: RegistryStatus::from_str(&status_str),
+                status: RegistryStatus::parse(&status_str),
             }
         })
         .collect::<Vec<_>>();
