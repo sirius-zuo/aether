@@ -1,8 +1,8 @@
+use super::{AgentFactory, Transport};
+use crate::{AetherError, Envelope};
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use crate::{AetherError, Envelope};
-use super::{AgentFactory, Transport};
 
 pub struct HttpTransport {
     pub node_name: String,
@@ -55,16 +55,19 @@ impl Transport for HttpTransport {
 #[async_trait]
 impl AgentFactory for HttpAgentFactory {
     async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
-        Ok(Arc::new(HttpTransport::new(&self.node_name, &self.http_url)))
+        Ok(Arc::new(HttpTransport::new(
+            &self.node_name,
+            &self.http_url,
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EnvelopeKind;
     use httpmock::prelude::*;
     use std::collections::HashMap;
-    use crate::EnvelopeKind;
 
     #[tokio::test]
     async fn http_transport_send_invoke() {

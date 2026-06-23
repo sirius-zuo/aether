@@ -1,7 +1,7 @@
+use crate::{AetherError, Envelope};
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use crate::{AetherError, Envelope};
 
 #[async_trait]
 pub trait Transport: Send + Sync {

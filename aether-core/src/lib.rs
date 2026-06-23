@@ -12,11 +12,11 @@ pub mod transport;
 pub mod types;
 pub mod workflow;
 
-pub use envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
 pub use dag::{DagNode, DagSpec};
-pub use orchestrator::Orchestrator;
+pub use envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
 pub use error::{AetherError, Outcome};
 pub use instance_manager::InstanceManager;
+pub use orchestrator::Orchestrator;
 pub use registry::AgentRegistry;
 pub use supervisor::{Supervisor, SupervisorEvent};
 pub use transport::{AgentFactory, Transport};

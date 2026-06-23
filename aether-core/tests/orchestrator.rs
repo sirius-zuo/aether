@@ -1,7 +1,12 @@
 use aether_core::orchestrator::Orchestrator;
 use aether_core::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
 use aether_core::{Envelope, EnvelopeKind, Outcome};
-use axum::{extract::Json, http::StatusCode, routing::{get, post}, Router};
+use axum::{
+    extract::Json,
+    http::StatusCode,
+    routing::{get, post},
+    Router,
+};
 use std::collections::HashMap;
 use tokio::net::TcpListener;
 
@@ -10,9 +15,18 @@ async fn start_echo_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = Router::new()
-        .route("/aether/invoke", post(|Json(env): Json<Envelope>| async move {
-            (StatusCode::OK, Json(Envelope { kind: EnvelopeKind::Result, ..env }))
-        }))
+        .route(
+            "/aether/invoke",
+            post(|Json(env): Json<Envelope>| async move {
+                (
+                    StatusCode::OK,
+                    Json(Envelope {
+                        kind: EnvelopeKind::Result,
+                        ..env
+                    }),
+                )
+            }),
+        )
         .route("/health", get(|| async { StatusCode::OK }));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://127.0.0.1:{port}")
@@ -23,13 +37,20 @@ async fn start_planner_server(dag: serde_json::Value) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = Router::new()
-        .route("/aether/invoke", post(move |Json(env): Json<Envelope>| {
-            let dag = dag.clone();
-            async move {
-                let resp = Envelope { kind: EnvelopeKind::Result, payload: dag, ..env };
-                (StatusCode::OK, Json(resp))
-            }
-        }))
+        .route(
+            "/aether/invoke",
+            post(move |Json(env): Json<Envelope>| {
+                let dag = dag.clone();
+                async move {
+                    let resp = Envelope {
+                        kind: EnvelopeKind::Result,
+                        payload: dag,
+                        ..env
+                    };
+                    (StatusCode::OK, Json(resp))
+                }
+            }),
+        )
         .route("/health", get(|| async { StatusCode::OK }));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("http://127.0.0.1:{port}")
@@ -79,7 +100,9 @@ async fn end_to_end_plan_and_execute() {
     register_healthy(&store, "s1", "writer", &synth_url, &["synthesize"]).await;
 
     let orch = Orchestrator::new(store);
-    let outcome = orch.submit(serde_json::json!({"goal": "summarize X"})).await;
+    let outcome = orch
+        .submit(serde_json::json!({"goal": "summarize X"}))
+        .await;
     match outcome {
         Outcome::Success(v) => assert_eq!(v["goal"], "summarize X"),
         other => panic!("expected Success, got {other:?}"),

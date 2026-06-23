@@ -1,9 +1,9 @@
+use crate::{AetherError, AgentNode, Envelope, SpawnPolicy, Transport};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use crate::{AetherError, AgentNode, Envelope, SpawnPolicy, Transport};
 
 pub enum NodeState {
     Singleton {
@@ -41,11 +41,14 @@ impl InstanceManager {
             SpawnPolicy::Singleton { max_queue } => {
                 let transport = node.factory.create().await?;
                 let mut states = self.states.lock().await;
-                states.insert(node.name.clone(), NodeState::Singleton {
-                    transport: Arc::new(Mutex::new(transport)),
-                    pending: Arc::new(AtomicUsize::new(0)),
-                    max_queue: *max_queue,
-                });
+                states.insert(
+                    node.name.clone(),
+                    NodeState::Singleton {
+                        transport: Arc::new(Mutex::new(transport)),
+                        pending: Arc::new(AtomicUsize::new(0)),
+                        max_queue: *max_queue,
+                    },
+                );
             }
             SpawnPolicy::Pool { size } => {
                 let mut transports = Vec::with_capacity(*size);
@@ -53,10 +56,13 @@ impl InstanceManager {
                     transports.push(node.factory.create().await?);
                 }
                 let mut states = self.states.lock().await;
-                states.insert(node.name.clone(), NodeState::Pool {
-                    transports,
-                    cursor: Arc::new(AtomicUsize::new(0)),
-                });
+                states.insert(
+                    node.name.clone(),
+                    NodeState::Pool {
+                        transports,
+                        cursor: Arc::new(AtomicUsize::new(0)),
+                    },
+                );
             }
             SpawnPolicy::PerRequest => {} // no persistent state
         }
@@ -64,18 +70,23 @@ impl InstanceManager {
     }
 
     /// Dispatch an Invoke envelope to the node. Applies timeout from AgentNode config.
-    pub async fn dispatch(&self, node: &AgentNode, envelope: Envelope) -> Result<Envelope, AetherError> {
+    pub async fn dispatch(
+        &self,
+        node: &AgentNode,
+        envelope: Envelope,
+    ) -> Result<Envelope, AetherError> {
         let states = self.states.lock().await;
 
         match states.get(&node.name) {
-            Some(NodeState::Singleton { transport, pending, max_queue }) => {
+            Some(NodeState::Singleton {
+                transport,
+                pending,
+                max_queue,
+            }) => {
                 if let Some(max) = max_queue {
                     if pending.load(Ordering::Acquire) >= *max {
                         return Err(AetherError::WorkflowError {
-                            message: format!(
-                                "singleton '{}' queue full (max {})",
-                                node.name, max
-                            ),
+                            message: format!("singleton '{}' queue full (max {})", node.name, max),
                         });
                     }
                 }
@@ -87,7 +98,8 @@ impl InstanceManager {
             }
             Some(NodeState::Pool { transports, cursor }) => {
                 let idx = cursor.fetch_add(1, Ordering::Relaxed) % transports.len();
-                let result = tokio::time::timeout(node.timeout, transports[idx].send(envelope)).await;
+                let result =
+                    tokio::time::timeout(node.timeout, transports[idx].send(envelope)).await;
                 self.unwrap_timeout(result, &node.name)
             }
             None => {
@@ -127,7 +139,9 @@ impl InstanceManager {
         match result {
             Ok(Ok(env)) => Ok(env),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(AetherError::AgentTimeout { node: node_name.to_string() }),
+            Err(_) => Err(AetherError::AgentTimeout {
+                node: node_name.to_string(),
+            }),
         }
     }
 }
@@ -135,19 +149,22 @@ impl InstanceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AetherError, Envelope, EnvelopeKind, FailurePolicy, SpawnPolicy, Transport};
     use crate::transport::AgentFactory;
+    use crate::{AetherError, Envelope, EnvelopeKind, FailurePolicy, SpawnPolicy, Transport};
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use async_trait::async_trait;
 
     struct EchoTransport;
 
     #[async_trait]
     impl Transport for EchoTransport {
         async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
-            Ok(Envelope { kind: EnvelopeKind::Result, ..msg })
+            Ok(Envelope {
+                kind: EnvelopeKind::Result,
+                ..msg
+            })
         }
         async fn shutdown(&self, _grace: Duration) {}
     }

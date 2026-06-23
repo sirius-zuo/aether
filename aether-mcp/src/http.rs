@@ -2,7 +2,11 @@
 
 use std::net::SocketAddr;
 
-use axum::{extract::{Json, State}, routing::post, Router};
+use axum::{
+    extract::{Json, State},
+    routing::post,
+    Router,
+};
 
 use crate::engine::McpEngine;
 use crate::jsonrpc::{handle_request, JsonRpcRequest, JsonRpcResponse};

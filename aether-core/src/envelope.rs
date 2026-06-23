@@ -24,7 +24,12 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn invoke(payload: Value, metadata: HashMap<String, String>) -> Self {
-        Self { id: Uuid::new_v4(), kind: EnvelopeKind::Invoke, payload, metadata }
+        Self {
+            id: Uuid::new_v4(),
+            kind: EnvelopeKind::Invoke,
+            payload,
+            metadata,
+        }
     }
 
     pub fn ping(id: Uuid) -> Self {

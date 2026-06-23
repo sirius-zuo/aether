@@ -1,7 +1,7 @@
+use crate::AetherError;
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use rusqlite::{Connection, params};
-use crate::AetherError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RegistryStatus {
@@ -47,10 +47,13 @@ pub struct RegistryStore {
 
 impl RegistryStore {
     pub fn open(path: &str) -> Result<Self, AetherError> {
-        let conn = Connection::open(path)
-            .map_err(|e| AetherError::RegistryError { message: e.to_string() })?;
+        let conn = Connection::open(path).map_err(|e| AetherError::RegistryError {
+            message: e.to_string(),
+        })?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| AetherError::RegistryError { message: e.to_string() })?;
+            .map_err(|e| AetherError::RegistryError {
+                message: e.to_string(),
+            })?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agents (
                 instance_id       TEXT PRIMARY KEY,
@@ -69,9 +72,14 @@ impl RegistryStore {
                 event_type    TEXT NOT NULL,
                 payload       TEXT NOT NULL,
                 received_at   TEXT NOT NULL
-            );"
-        ).map_err(|e| AetherError::RegistryError { message: e.to_string() })?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+            );",
+        )
+        .map_err(|e| AetherError::RegistryError {
+            message: e.to_string(),
+        })?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, AetherError> {
@@ -88,15 +96,28 @@ impl RegistryStore {
             conn.execute(
                 "DELETE FROM agents WHERE http_url = ?1 AND instance_id != ?2",
                 params![entry.http_url, entry.instance_id],
-            ).ok();
+            )
+            .ok();
             conn.execute(
                 "INSERT OR REPLACE INTO agents
                  (instance_id, name, http_url, capabilities, metadata, registered_at, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unknown')",
-                params![entry.instance_id, entry.name, entry.http_url,
-                        caps, meta, entry.registered_at],
-            ).map_err(|e| e.to_string())
-        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
+                params![
+                    entry.instance_id,
+                    entry.name,
+                    entry.http_url,
+                    caps,
+                    meta,
+                    entry.registered_at
+                ],
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| AetherError::RegistryError {
+            message: e.to_string(),
+        })?
+        .map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(())
     }
 
@@ -104,10 +125,16 @@ impl RegistryStore {
         let conn = Arc::clone(&self.conn);
         let id = instance_id.to_string();
         let affected = tokio::task::spawn_blocking(move || {
-            conn.lock().unwrap_or_else(|e| e.into_inner())
+            conn.lock()
+                .unwrap_or_else(|e| e.into_inner())
                 .execute("DELETE FROM agents WHERE instance_id = ?1", params![id])
                 .map_err(|e| e.to_string())
-        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
+        })
+        .await
+        .map_err(|e| AetherError::RegistryError {
+            message: e.to_string(),
+        })?
+        .map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(affected > 0)
     }
 
@@ -122,13 +149,19 @@ impl RegistryStore {
         let ts = timestamp.to_string();
         let st = status.as_str().to_string();
         tokio::task::spawn_blocking(move || {
-            conn.lock().unwrap_or_else(|e| e.into_inner())
+            conn.lock()
+                .unwrap_or_else(|e| e.into_inner())
                 .execute(
                     "UPDATE agents SET status = ?1, last_health_check = ?2 WHERE instance_id = ?3",
                     params![st, ts, id],
                 )
                 .map_err(|e| e.to_string())
-        }).await.map_err(|e| AetherError::RegistryError { message: e.to_string() })?.map_err(|e| AetherError::RegistryError { message: e })?;
+        })
+        .await
+        .map_err(|e| AetherError::RegistryError {
+            message: e.to_string(),
+        })?
+        .map_err(|e| AetherError::RegistryError { message: e })?;
         Ok(())
     }
 
@@ -182,33 +215,34 @@ impl RegistryStore {
         stmt: &mut rusqlite::Statement<'_>,
         params: impl rusqlite::Params,
     ) -> Result<Vec<RegistrationEntry>, String> {
-        let entries = stmt.query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .map(|(iid, name, url, caps_str, meta_str, reg_at, lhc, status_str)| {
-            RegistrationEntry {
-                instance_id: iid,
-                name,
-                http_url: url,
-                capabilities: serde_json::from_str(&caps_str).unwrap_or_default(),
-                metadata: serde_json::from_str(&meta_str).unwrap_or_default(),
-                registered_at: reg_at,
-                last_health_check: lhc,
-                status: RegistryStatus::parse(&status_str),
-            }
-        })
-        .collect::<Vec<_>>();
+        let entries = stmt
+            .query_map(params, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .map(
+                |(iid, name, url, caps_str, meta_str, reg_at, lhc, status_str)| RegistrationEntry {
+                    instance_id: iid,
+                    name,
+                    http_url: url,
+                    capabilities: serde_json::from_str(&caps_str).unwrap_or_default(),
+                    metadata: serde_json::from_str(&meta_str).unwrap_or_default(),
+                    registered_at: reg_at,
+                    last_health_check: lhc,
+                    status: RegistryStatus::parse(&status_str),
+                },
+            )
+            .collect::<Vec<_>>();
         Ok(entries)
     }
 }
@@ -260,18 +294,32 @@ mod tests {
     async fn same_url_reregister_replaces_instance() {
         let store = RegistryStore::open_in_memory().unwrap();
         let url = "http://127.0.0.1:9000";
-        store.register(RegistrationEntry {
-            instance_id: "old-id".to_string(), name: "a".to_string(),
-            http_url: url.to_string(), capabilities: vec![], metadata: HashMap::new(),
-            registered_at: "2026-05-21T00:00:00Z".to_string(),
-            last_health_check: None, status: RegistryStatus::Unknown,
-        }).await.unwrap();
-        store.register(RegistrationEntry {
-            instance_id: "new-id".to_string(), name: "a".to_string(),
-            http_url: url.to_string(), capabilities: vec![], metadata: HashMap::new(),
-            registered_at: "2026-05-21T00:01:00Z".to_string(),
-            last_health_check: None, status: RegistryStatus::Unknown,
-        }).await.unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: "old-id".to_string(),
+                name: "a".to_string(),
+                http_url: url.to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: "2026-05-21T00:00:00Z".to_string(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: "new-id".to_string(),
+                name: "a".to_string(),
+                http_url: url.to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: "2026-05-21T00:01:00Z".to_string(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
         let all = store.list_all().await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].instance_id, "new-id");
@@ -280,33 +328,60 @@ mod tests {
     #[tokio::test]
     async fn update_health_changes_status() {
         let store = RegistryStore::open_in_memory().unwrap();
-        store.register(RegistrationEntry {
-            instance_id: "inst-3".to_string(), name: "x".to_string(),
-            http_url: "http://127.0.0.1:9001".to_string(), capabilities: vec![],
-            metadata: HashMap::new(), registered_at: "2026-05-21T00:00:00Z".to_string(),
-            last_health_check: None, status: RegistryStatus::Unknown,
-        }).await.unwrap();
-        store.update_health("inst-3", RegistryStatus::Healthy, "2026-05-21T00:01:00Z").await.unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: "inst-3".to_string(),
+                name: "x".to_string(),
+                http_url: "http://127.0.0.1:9001".to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: "2026-05-21T00:00:00Z".to_string(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
+        store
+            .update_health("inst-3", RegistryStatus::Healthy, "2026-05-21T00:01:00Z")
+            .await
+            .unwrap();
         let all = store.list_all().await.unwrap();
         assert_eq!(all[0].status, RegistryStatus::Healthy);
-        assert_eq!(all[0].last_health_check.as_deref(), Some("2026-05-21T00:01:00Z"));
+        assert_eq!(
+            all[0].last_health_check.as_deref(),
+            Some("2026-05-21T00:01:00Z")
+        );
     }
 
     #[tokio::test]
     async fn list_by_name_filters_correctly() {
         let store = RegistryStore::open_in_memory().unwrap();
-        store.register(RegistrationEntry {
-            instance_id: "a1".to_string(), name: "calc".to_string(),
-            http_url: "http://127.0.0.1:9010".to_string(), capabilities: vec![],
-            metadata: HashMap::new(), registered_at: "2026-05-21T00:00:00Z".to_string(),
-            last_health_check: None, status: RegistryStatus::Unknown,
-        }).await.unwrap();
-        store.register(RegistrationEntry {
-            instance_id: "b1".to_string(), name: "writer".to_string(),
-            http_url: "http://127.0.0.1:9011".to_string(), capabilities: vec![],
-            metadata: HashMap::new(), registered_at: "2026-05-21T00:00:00Z".to_string(),
-            last_health_check: None, status: RegistryStatus::Unknown,
-        }).await.unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: "a1".to_string(),
+                name: "calc".to_string(),
+                http_url: "http://127.0.0.1:9010".to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: "2026-05-21T00:00:00Z".to_string(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: "b1".to_string(),
+                name: "writer".to_string(),
+                http_url: "http://127.0.0.1:9011".to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: "2026-05-21T00:00:00Z".to_string(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
         let calcs = store.list_by_name("calc").await.unwrap();
         assert_eq!(calcs.len(), 1);
         assert_eq!(calcs[0].instance_id, "a1");

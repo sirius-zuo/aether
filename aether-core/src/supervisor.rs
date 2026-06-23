@@ -1,15 +1,14 @@
+use crate::instance_manager::InstanceManager;
+use crate::{
+    AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, HealthStatus, Outcome, Workflow,
+};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use uuid::Uuid;
-use crate::{
-    AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind,
-    HealthStatus, Outcome, Workflow,
-};
-use crate::instance_manager::InstanceManager;
 
 type TaskResult = Result<(String, Envelope, Vec<(String, String)>), AetherError>;
 
@@ -19,13 +18,40 @@ fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::
 
 #[derive(Debug, Clone, Serialize)]
 pub enum SupervisorEvent {
-    WorkflowStarted  { workflow_id: Uuid, entry: String },
-    WorkflowFinished { workflow_id: Uuid, result: Outcome },
-    TaskDispatched   { workflow_id: Uuid, node: String, envelope_id: Uuid },
-    TaskCompleted    { workflow_id: Uuid, node: String, envelope_id: Uuid, #[serde(serialize_with = "serialize_duration_ms")] elapsed: Duration },
-    TaskFailed       { workflow_id: Uuid, node: String, error: String, attempt: usize },
-    AgentRestarted   { node: String, reason: String },
-    AgentHealthCheck { node: String, status: HealthStatus },
+    WorkflowStarted {
+        workflow_id: Uuid,
+        entry: String,
+    },
+    WorkflowFinished {
+        workflow_id: Uuid,
+        result: Outcome,
+    },
+    TaskDispatched {
+        workflow_id: Uuid,
+        node: String,
+        envelope_id: Uuid,
+    },
+    TaskCompleted {
+        workflow_id: Uuid,
+        node: String,
+        envelope_id: Uuid,
+        #[serde(serialize_with = "serialize_duration_ms")]
+        elapsed: Duration,
+    },
+    TaskFailed {
+        workflow_id: Uuid,
+        node: String,
+        error: String,
+        attempt: usize,
+    },
+    AgentRestarted {
+        node: String,
+        reason: String,
+    },
+    AgentHealthCheck {
+        node: String,
+        status: HealthStatus,
+    },
 }
 
 pub struct Supervisor {
@@ -38,7 +64,11 @@ impl Supervisor {
     pub fn new(registry: AgentRegistry) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let instance_manager = Arc::new(InstanceManager::new());
-        Self { registry, instance_manager, event_tx }
+        Self {
+            registry,
+            instance_manager,
+            event_tx,
+        }
     }
 
     pub fn watch(&self) -> broadcast::Receiver<SupervisorEvent> {
@@ -65,8 +95,14 @@ impl Supervisor {
         let outcome = match result {
             Ok(v) => Outcome::Success(v),
             Err(AetherError::AgentTimeout { node }) => Outcome::Timeout { node },
-            Err(AetherError::AgentFailed { node, message }) => Outcome::Failed { node, error: message },
-            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(AetherError::AgentFailed { node, message }) => Outcome::Failed {
+                node,
+                error: message,
+            },
+            Err(e) => Outcome::Failed {
+                node: String::new(),
+                error: e.to_string(),
+            },
         };
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
@@ -91,7 +127,10 @@ impl Supervisor {
         // Pre-compute incoming edge sources for fan-in nodes (2+ incoming edges)
         let mut fan_in_slots: HashMap<String, Vec<String>> = HashMap::new();
         for edge in &workflow.edges {
-            fan_in_slots.entry(edge.to.clone()).or_default().push(edge.from.clone());
+            fan_in_slots
+                .entry(edge.to.clone())
+                .or_default()
+                .push(edge.from.clone());
         }
         let fan_in_slots: HashMap<String, Vec<String>> = fan_in_slots
             .into_iter()
@@ -120,15 +159,14 @@ impl Supervisor {
                 let sup_registry = self.registry.clone();
                 let sup_im = Arc::clone(&self.instance_manager);
                 let sup_event = self.event_tx.clone();
-                let wf_edges: Vec<_> = workflow.outgoing(&node_name)
-                    .into_iter()
-                    .cloned()
-                    .collect();
+                let wf_edges: Vec<_> = workflow.outgoing(&node_name).into_iter().cloned().collect();
                 let node_name_c = node_name.clone();
 
                 join_set.spawn(async move {
-                    let node = sup_registry.get(&node_name_c).ok_or_else(|| AetherError::RegistryError {
-                        message: format!("node '{}' not found at dispatch time", node_name_c),
+                    let node = sup_registry.get(&node_name_c).ok_or_else(|| {
+                        AetherError::RegistryError {
+                            message: format!("node '{}' not found at dispatch time", node_name_c),
+                        }
                     })?;
 
                     // Aether sets trace_id/workflow_id/node — never trusts agent-supplied values
@@ -152,7 +190,12 @@ impl Supervisor {
 
                     let start = Instant::now();
                     let response = dispatch_with_failure_policy(
-                        &sup_im, &node, envelope, &sup_registry, workflow_id, &sup_event,
+                        &sup_im,
+                        &node,
+                        envelope,
+                        &sup_registry,
+                        workflow_id,
+                        &sup_event,
                     )
                     .await?;
                     let elapsed = start.elapsed();
@@ -285,21 +328,24 @@ async fn dispatch_with_failure_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        AgentNode, AgentRegistry, AetherError, Envelope, EnvelopeKind,
-        FailurePolicy, SpawnPolicy, Transport, Workflow,
-    };
     use crate::transport::AgentFactory;
+    use crate::{
+        AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, FailurePolicy, SpawnPolicy,
+        Transport, Workflow,
+    };
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use async_trait::async_trait;
 
     struct EchoTransport;
     #[async_trait]
     impl Transport for EchoTransport {
         async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
-            Ok(Envelope { kind: EnvelopeKind::Result, ..msg })
+            Ok(Envelope {
+                kind: EnvelopeKind::Result,
+                ..msg
+            })
         }
         async fn shutdown(&self, _: Duration) {}
     }
@@ -313,7 +359,8 @@ mod tests {
 
     fn mk_node(name: &str) -> AgentNode {
         AgentNode {
-            name: name.to_string(), capabilities: vec![],
+            name: name.to_string(),
+            capabilities: vec![],
             factory: Arc::new(EchoFactory),
             spawn: SpawnPolicy::PerRequest,
             failure: FailurePolicy::default(),
@@ -325,14 +372,19 @@ mod tests {
 
     fn reg(names: &[&str]) -> AgentRegistry {
         let r = AgentRegistry::new();
-        for &n in names { r.register(mk_node(n)); }
+        for &n in names {
+            r.register(mk_node(n));
+        }
         r
     }
 
     #[tokio::test]
     async fn single_node_workflow_returns_payload() {
         let r = reg(&["only"]);
-        let wf = Workflow { entry: "only".to_string(), edges: vec![] };
+        let wf = Workflow {
+            entry: "only".to_string(),
+            edges: vec![],
+        };
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!({"msg": "hi"})).await;
         assert!(matches!(outcome, Outcome::Success(_)));
@@ -355,7 +407,8 @@ mod tests {
             .edge("intake", "right")
             .edge("left", "merge")
             .edge("right", "merge")
-            .build().unwrap();
+            .build()
+            .unwrap();
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!("start")).await;
         if let Outcome::Success(v) = outcome {
@@ -369,7 +422,10 @@ mod tests {
     #[tokio::test]
     async fn supervisor_event_stream_receives_workflow_started() {
         let r = reg(&["x"]);
-        let wf = Workflow { entry: "x".to_string(), edges: vec![] };
+        let wf = Workflow {
+            entry: "x".to_string(),
+            edges: vec![],
+        };
         let sup = Supervisor::new(r);
         let mut rx = sup.watch();
         sup.run(&wf, serde_json::json!(null)).await;
@@ -384,7 +440,11 @@ mod tests {
         impl Transport for MetaEchoTransport {
             async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
                 let meta = serde_json::to_value(&msg.metadata).unwrap();
-                Ok(Envelope { kind: EnvelopeKind::Result, payload: meta, ..msg })
+                Ok(Envelope {
+                    kind: EnvelopeKind::Result,
+                    payload: meta,
+                    ..msg
+                })
             }
             async fn shutdown(&self, _: Duration) {}
         }
@@ -400,7 +460,8 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert("instruction".to_string(), "do-the-thing".to_string());
         r.register(AgentNode {
-            name: "worker".to_string(), capabilities: vec![],
+            name: "worker".to_string(),
+            capabilities: vec![],
             factory: Arc::new(MetaEchoFactory),
             spawn: SpawnPolicy::PerRequest,
             failure: FailurePolicy::default(),
@@ -408,7 +469,10 @@ mod tests {
             shutdown_grace: Duration::from_secs(1),
             metadata,
         });
-        let wf = Workflow { entry: "worker".to_string(), edges: vec![] };
+        let wf = Workflow {
+            entry: "worker".to_string(),
+            edges: vec![],
+        };
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!(null)).await;
         match outcome {
@@ -426,7 +490,11 @@ mod tests {
         #[async_trait]
         impl Transport for FailTransport {
             async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
-                Ok(Envelope { kind: EnvelopeKind::Error, payload: serde_json::json!("boom"), ..msg })
+                Ok(Envelope {
+                    kind: EnvelopeKind::Error,
+                    payload: serde_json::json!("boom"),
+                    ..msg
+                })
             }
             async fn shutdown(&self, _: Duration) {}
         }
@@ -440,19 +508,31 @@ mod tests {
 
         let r = AgentRegistry::new();
         r.register(AgentNode {
-            name: "bad".to_string(), capabilities: vec![],
+            name: "bad".to_string(),
+            capabilities: vec![],
             factory: Arc::new(FailFactory),
             spawn: SpawnPolicy::PerRequest,
-            failure: FailurePolicy { retries: 0, restart_on_failure: false, fallback: Some("good".into()) },
+            failure: FailurePolicy {
+                retries: 0,
+                restart_on_failure: false,
+                fallback: Some("good".into()),
+            },
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
         });
         r.register(mk_node("good"));
 
-        let wf = Workflow { entry: "bad".to_string(), edges: vec![] };
+        let wf = Workflow {
+            entry: "bad".to_string(),
+            edges: vec![],
+        };
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!("data")).await;
-        assert!(matches!(outcome, Outcome::Success(_)), "expected fallback to succeed, got {:?}", outcome);
+        assert!(
+            matches!(outcome, Outcome::Success(_)),
+            "expected fallback to succeed, got {:?}",
+            outcome
+        );
     }
 }

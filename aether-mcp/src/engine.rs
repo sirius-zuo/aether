@@ -12,7 +12,10 @@ pub struct McpEngine {
 
 impl McpEngine {
     pub fn new(orchestrator: Orchestrator) -> Self {
-        Self { orchestrator, jobs: JobStore::new() }
+        Self {
+            orchestrator,
+            jobs: JobStore::new(),
+        }
     }
 
     /// Spawn the orchestrator run in the background; return a poll handle immediately.

@@ -31,7 +31,10 @@ impl JobStore {
     }
 
     pub fn complete(&self, id: Uuid, outcome: Outcome) {
-        self.jobs.lock().unwrap().insert(id, JobState::Done { result: outcome });
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(id, JobState::Done { result: outcome });
     }
 
     pub fn get(&self, id: &Uuid) -> Option<JobState> {
@@ -50,7 +53,9 @@ mod tests {
         assert!(matches!(store.get(&id), Some(JobState::Running)));
         store.complete(id, Outcome::Success(serde_json::json!({"ok": true})));
         match store.get(&id) {
-            Some(JobState::Done { result: Outcome::Success(v) }) => assert_eq!(v["ok"], true),
+            Some(JobState::Done {
+                result: Outcome::Success(v),
+            }) => assert_eq!(v["ok"], true),
             other => panic!("expected Done/Success, got {other:?}"),
         }
     }

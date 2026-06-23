@@ -35,10 +35,10 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let analyst_url = std::env::var("ANALYST_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-    let writer_url = std::env::var("WRITER_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
+    let analyst_url =
+        std::env::var("ANALYST_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let writer_url =
+        std::env::var("WRITER_URL").unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
 
     info!(analyst_url = %analyst_url, writer_url = %writer_url, "Agent URLs");
 
@@ -53,7 +53,10 @@ async fn main() {
             http_url: analyst_url,
         }),
         spawn: SpawnPolicy::PerRequest,
-        failure: FailurePolicy { retries: 1, ..Default::default() },
+        failure: FailurePolicy {
+            retries: 1,
+            ..Default::default()
+        },
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
         metadata: HashMap::new(),
@@ -67,7 +70,10 @@ async fn main() {
             http_url: writer_url,
         }),
         spawn: SpawnPolicy::PerRequest,
-        failure: FailurePolicy { retries: 1, ..Default::default() },
+        failure: FailurePolicy {
+            retries: 1,
+            ..Default::default()
+        },
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
         metadata: HashMap::new(),
@@ -86,7 +92,10 @@ async fn main() {
 
     let addr = aether_dashboard::start(
         Arc::clone(&state),
-        DashboardConfig { port: 7700, auth_token: None },
+        DashboardConfig {
+            port: 7700,
+            auth_token: None,
+        },
     )
     .await
     .expect("dashboard failed to start");

@@ -1,8 +1,8 @@
+use crate::registry_store::{RegistryStatus, RegistryStore};
+use reqwest::Client;
 use std::collections::HashMap;
 use std::time::Duration;
-use reqwest::Client;
 use tokio::task::JoinHandle;
-use crate::registry_store::{RegistryStatus, RegistryStore};
 
 pub struct HealthPoller {
     pub(crate) store: RegistryStore,
@@ -48,17 +48,27 @@ impl HealthPoller {
         for entry in entries {
             let url = format!("{}/health", entry.http_url.trim_end_matches('/'));
             let now = chrono::Utc::now().to_rfc3339();
-            let ok = self.client.get(&url).send().await
+            let ok = self
+                .client
+                .get(&url)
+                .send()
+                .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
             if ok {
                 failure_counts.remove(&entry.instance_id);
-                let _ = self.store.update_health(&entry.instance_id, RegistryStatus::Healthy, &now).await;
+                let _ = self
+                    .store
+                    .update_health(&entry.instance_id, RegistryStatus::Healthy, &now)
+                    .await;
             } else {
                 let count = failure_counts.entry(entry.instance_id.clone()).or_insert(0);
                 *count += 1;
                 if *count >= self.failure_threshold {
-                    let _ = self.store.update_health(&entry.instance_id, RegistryStatus::Unhealthy, &now).await;
+                    let _ = self
+                        .store
+                        .update_health(&entry.instance_id, RegistryStatus::Unhealthy, &now)
+                        .await;
                 }
             }
         }
@@ -73,16 +83,19 @@ mod tests {
 
     async fn register_agent(store: &RegistryStore, url: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        store.register(RegistrationEntry {
-            instance_id: id.clone(),
-            name: "test".to_string(),
-            http_url: url.to_string(),
-            capabilities: vec![],
-            metadata: HashMap::new(),
-            registered_at: chrono::Utc::now().to_rfc3339(),
-            last_health_check: None,
-            status: RegistryStatus::Unknown,
-        }).await.unwrap();
+        store
+            .register(RegistrationEntry {
+                instance_id: id.clone(),
+                name: "test".to_string(),
+                http_url: url.to_string(),
+                capabilities: vec![],
+                metadata: HashMap::new(),
+                registered_at: chrono::Utc::now().to_rfc3339(),
+                last_health_check: None,
+                status: RegistryStatus::Unknown,
+            })
+            .await
+            .unwrap();
         id
     }
 
@@ -117,7 +130,10 @@ mod tests {
         let poller = HealthPoller {
             store: store.clone(),
             interval: Duration::from_millis(1),
-            client: Client::builder().timeout(Duration::from_millis(100)).build().unwrap(),
+            client: Client::builder()
+                .timeout(Duration::from_millis(100))
+                .build()
+                .unwrap(),
             failure_threshold: 3,
         };
 
@@ -150,6 +166,10 @@ mod tests {
         poller.run_once().await;
 
         let all = store.list_all().await.unwrap();
-        assert_eq!(all[0].status, RegistryStatus::Healthy, "one success should set healthy");
+        assert_eq!(
+            all[0].status,
+            RegistryStatus::Healthy,
+            "one success should set healthy"
+        );
     }
 }

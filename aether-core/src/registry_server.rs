@@ -140,9 +140,15 @@ async fn list_agents(
     let summaries: Vec<AgentSummary> = groups
         .into_iter()
         .map(|(name, instances)| {
-            let status = if instances.iter().any(|i| i.status == RegistryStatus::Healthy) {
+            let status = if instances
+                .iter()
+                .any(|i| i.status == RegistryStatus::Healthy)
+            {
                 "healthy"
-            } else if instances.iter().all(|i| i.status == RegistryStatus::Unhealthy) {
+            } else if instances
+                .iter()
+                .all(|i| i.status == RegistryStatus::Unhealthy)
+            {
                 "unhealthy"
             } else {
                 "unknown"
@@ -155,7 +161,11 @@ async fn list_agents(
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::to_value(summaries).unwrap())).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(summaries).unwrap()),
+    )
+        .into_response()
 }
 
 async fn list_instances(
@@ -183,7 +193,11 @@ async fn get_instance(
     match store.list_by_name(&name).await {
         Ok(entries) => {
             if let Some(e) = entries.into_iter().find(|e| e.instance_id == id) {
-                (StatusCode::OK, Json(serde_json::to_value(e).unwrap_or_default())).into_response()
+                (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(e).unwrap_or_default()),
+                )
+                    .into_response()
             } else {
                 (
                     StatusCode::NOT_FOUND,
@@ -284,10 +298,9 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 1024).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 1024).await.unwrap())
+                .unwrap();
         assert!(body["instance_id"].as_str().is_some());
         assert_eq!(body["poll_interval_secs"], 30);
     }
@@ -307,10 +320,9 @@ mod tests {
         let app2 = make_registry_router(store, 30);
         let res = get_path(app2, "/registry/agents").await;
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 2048).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 2048).await.unwrap())
+                .unwrap();
         assert!(body.as_array().unwrap().iter().any(|s| s["name"] == "calc"));
     }
 
@@ -326,10 +338,9 @@ mod tests {
             }),
         )
         .await;
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(reg.into_body(), 1024).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(reg.into_body(), 1024).await.unwrap())
+                .unwrap();
         let id = body["instance_id"].as_str().unwrap().to_string();
 
         let app2 = make_registry_router(store, 30);
@@ -349,10 +360,9 @@ mod tests {
             }),
         )
         .await;
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(reg.into_body(), 1024).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(reg.into_body(), 1024).await.unwrap())
+                .unwrap();
         let id = body["instance_id"].as_str().unwrap().to_string();
 
         let app2 = make_registry_router(store, 30);

@@ -3,8 +3,8 @@
 //! A planner agent returns a `DagSpec` as its Envelope result payload. Any agent
 //! that emits valid DAG JSON can serve as a planner.
 
-use serde::{Deserialize, Serialize};
 use crate::AetherError;
+use serde::{Deserialize, Serialize};
 
 /// A single node in a planned DAG.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -50,22 +50,34 @@ impl DagSpec {
         let mut ids = std::collections::HashSet::new();
         for n in &self.nodes {
             if !ids.insert(n.id.as_str()) {
-                return Err(err(format!("duplicate node id '{}'" , n.id)));
+                return Err(err(format!("duplicate node id '{}'", n.id)));
             }
             if n.capability.is_none() && n.agent.is_none() {
-                return Err(err(format!("node '{}' has neither capability nor agent", n.id)));
+                return Err(err(format!(
+                    "node '{}' has neither capability nor agent",
+                    n.id
+                )));
             }
         }
         for n in &self.nodes {
             for dep in &n.depends_on {
                 if !ids.contains(dep.as_str()) {
-                    return Err(err(format!("node '{}' depends on unknown node '{}'" , n.id, dep)));
+                    return Err(err(format!(
+                        "node '{}' depends on unknown node '{}'",
+                        n.id, dep
+                    )));
                 }
             }
         }
-        let entries = self.nodes.iter().filter(|n| n.depends_on.is_empty()).count();
+        let entries = self
+            .nodes
+            .iter()
+            .filter(|n| n.depends_on.is_empty())
+            .count();
         if entries != 1 {
-            return Err(err(format!("DAG must have exactly one entry node (found {entries})")));
+            return Err(err(format!(
+                "DAG must have exactly one entry node (found {entries})"
+            )));
         }
         Ok(())
     }
@@ -104,7 +116,10 @@ mod tests {
     #[test]
     fn parse_rejects_non_object() {
         let json = serde_json::json!("not a dag");
-        assert!(matches!(DagSpec::parse(&json), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            DagSpec::parse(&json),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 
     fn dag(nodes: serde_json::Value) -> DagSpec {
@@ -124,7 +139,10 @@ mod tests {
     #[test]
     fn validate_rejects_empty() {
         let d = dag(serde_json::json!([]));
-        assert!(matches!(d.validate(), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 
     #[test]
@@ -133,7 +151,10 @@ mod tests {
             { "id": "a", "capability": "x", "depends_on": [] },
             { "id": "a", "capability": "y", "depends_on": [] }
         ]));
-        assert!(matches!(d.validate(), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 
     #[test]
@@ -141,7 +162,10 @@ mod tests {
         let d = dag(serde_json::json!([
             { "id": "a", "capability": "x", "depends_on": ["ghost"] }
         ]));
-        assert!(matches!(d.validate(), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 
     #[test]
@@ -149,7 +173,10 @@ mod tests {
         let d = dag(serde_json::json!([
             { "id": "a", "depends_on": [] }
         ]));
-        assert!(matches!(d.validate(), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 
     #[test]
@@ -158,6 +185,9 @@ mod tests {
             { "id": "a", "capability": "x", "depends_on": [] },
             { "id": "b", "capability": "y", "depends_on": [] }
         ]));
-        assert!(matches!(d.validate(), Err(AetherError::WorkflowError { .. })));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
     }
 }

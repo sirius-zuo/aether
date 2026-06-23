@@ -20,5 +20,8 @@ async fn submit_goal_without_planner_resolves_to_failed() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         state = engine.get_result(id);
     }
-    assert!(matches!(state, Some(JobState::Done { .. })), "job should complete, got {state:?}");
+    assert!(
+        matches!(state, Some(JobState::Done { .. })),
+        "job should complete, got {state:?}"
+    );
 }

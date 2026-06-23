@@ -45,7 +45,9 @@ async fn resolve_capability(
 ) -> Result<RegistrationEntry, AetherError> {
     let all = store.list_all().await?;
     all.into_iter()
-        .find(|e| e.status == RegistryStatus::Healthy && e.capabilities.iter().any(|c| c == capability))
+        .find(|e| {
+            e.status == RegistryStatus::Healthy && e.capabilities.iter().any(|c| c == capability)
+        })
         .ok_or_else(|| AetherError::RegistryError {
             message: format!("no healthy agent for capability '{capability}'"),
         })
@@ -78,7 +80,10 @@ async fn build_registry_and_workflow(
         let entry = if let Some(agent) = &node.agent {
             resolve_agent(store, agent).await?
         } else {
-            let cap = node.capability.as_deref().expect("validated node has capability");
+            let cap = node
+                .capability
+                .as_deref()
+                .expect("validated node has capability");
             resolve_capability(store, cap).await?
         };
         registry.register(registration_to_node(
@@ -114,14 +119,24 @@ impl Orchestrator {
     pub async fn submit(&self, goal: Value) -> Outcome {
         let planner = match resolve_capability(&self.store, "plan").await {
             Ok(p) => p,
-            Err(e) => return Outcome::Failed { node: "planner".to_string(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: "planner".to_string(),
+                    error: e.to_string(),
+                }
+            }
         };
 
         let transport = HttpTransport::new("planner", &planner.http_url);
         let invoke = Envelope::invoke(goal.clone(), HashMap::new());
         let response = match transport.send(invoke).await {
             Ok(env) => env,
-            Err(e) => return Outcome::Failed { node: "planner".to_string(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: "planner".to_string(),
+                    error: e.to_string(),
+                }
+            }
         };
         if response.kind == EnvelopeKind::Error {
             return Outcome::Failed {
@@ -132,12 +147,22 @@ impl Orchestrator {
 
         let dag = match DagSpec::parse(&response.payload) {
             Ok(d) => d,
-            Err(e) => return Outcome::Failed { node: "planner".to_string(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: "planner".to_string(),
+                    error: e.to_string(),
+                }
+            }
         };
 
         let (registry, workflow) = match build_registry_and_workflow(&self.store, &dag).await {
             Ok(rw) => rw,
-            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
         };
 
         Supervisor::new(registry).run(&workflow, goal).await
@@ -162,7 +187,9 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    async fn store_with(entries: Vec<(&str, &str, &str, &[&str], RegistryStatus)>) -> RegistryStore {
+    async fn store_with(
+        entries: Vec<(&str, &str, &str, &[&str], RegistryStatus)>,
+    ) -> RegistryStore {
         let store = RegistryStore::open_in_memory().unwrap();
         for (iid, name, url, caps, status) in entries {
             store
@@ -190,7 +217,10 @@ mod tests {
     fn registration_to_node_sets_instruction_metadata() {
         let node = registration_to_node("n1", "http://127.0.0.1:8080", Some("go"));
         assert_eq!(node.name, "n1");
-        assert_eq!(node.metadata.get("instruction").map(String::as_str), Some("go"));
+        assert_eq!(
+            node.metadata.get("instruction").map(String::as_str),
+            Some("go")
+        );
     }
 
     #[test]
@@ -202,8 +232,20 @@ mod tests {
     #[tokio::test]
     async fn resolve_capability_picks_healthy() {
         let store = store_with(vec![
-            ("i1", "researcher", "http://127.0.0.1:1", &["research"], RegistryStatus::Unhealthy),
-            ("i2", "researcher2", "http://127.0.0.1:2", &["research"], RegistryStatus::Healthy),
+            (
+                "i1",
+                "researcher",
+                "http://127.0.0.1:1",
+                &["research"],
+                RegistryStatus::Unhealthy,
+            ),
+            (
+                "i2",
+                "researcher2",
+                "http://127.0.0.1:2",
+                &["research"],
+                RegistryStatus::Healthy,
+            ),
         ])
         .await;
         let e = resolve_capability(&store, "research").await.unwrap();
@@ -212,9 +254,13 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_capability_errors_when_none_healthy() {
-        let store = store_with(vec![
-            ("i1", "researcher", "http://127.0.0.1:1", &["research"], RegistryStatus::Unhealthy),
-        ])
+        let store = store_with(vec![(
+            "i1",
+            "researcher",
+            "http://127.0.0.1:1",
+            &["research"],
+            RegistryStatus::Unhealthy,
+        )])
         .await;
         assert!(matches!(
             resolve_capability(&store, "research").await,
@@ -225,8 +271,20 @@ mod tests {
     #[tokio::test]
     async fn resolve_agent_pins_by_name() {
         let store = store_with(vec![
-            ("i1", "writer", "http://127.0.0.1:1", &["write"], RegistryStatus::Healthy),
-            ("i2", "other", "http://127.0.0.1:2", &["write"], RegistryStatus::Healthy),
+            (
+                "i1",
+                "writer",
+                "http://127.0.0.1:1",
+                &["write"],
+                RegistryStatus::Healthy,
+            ),
+            (
+                "i2",
+                "other",
+                "http://127.0.0.1:2",
+                &["write"],
+                RegistryStatus::Healthy,
+            ),
         ])
         .await;
         let e = resolve_agent(&store, "writer").await.unwrap();
@@ -236,8 +294,20 @@ mod tests {
     #[tokio::test]
     async fn build_workflow_maps_dependencies_to_edges() {
         let store = store_with(vec![
-            ("i1", "researcher", "http://127.0.0.1:1", &["research"], RegistryStatus::Healthy),
-            ("i2", "writer", "http://127.0.0.1:2", &["synthesize"], RegistryStatus::Healthy),
+            (
+                "i1",
+                "researcher",
+                "http://127.0.0.1:1",
+                &["research"],
+                RegistryStatus::Healthy,
+            ),
+            (
+                "i2",
+                "writer",
+                "http://127.0.0.1:2",
+                &["synthesize"],
+                RegistryStatus::Healthy,
+            ),
         ])
         .await;
         let dag = DagSpec::parse(&serde_json::json!({
@@ -258,9 +328,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_workflow_errors_on_missing_capability() {
-        let store = store_with(vec![
-            ("i1", "researcher", "http://127.0.0.1:1", &["research"], RegistryStatus::Healthy),
-        ])
+        let store = store_with(vec![(
+            "i1",
+            "researcher",
+            "http://127.0.0.1:1",
+            &["research"],
+            RegistryStatus::Healthy,
+        )])
         .await;
         let dag = DagSpec::parse(&serde_json::json!({
             "nodes": [ { "id": "n1", "capability": "nonexistent", "depends_on": [] } ]
@@ -283,9 +357,27 @@ mod tests {
     #[tokio::test]
     async fn list_capabilities_dedupes_across_healthy() {
         let store = store_with(vec![
-            ("i1", "a", "http://127.0.0.1:1", &["research", "write"], RegistryStatus::Healthy),
-            ("i2", "b", "http://127.0.0.1:2", &["write"], RegistryStatus::Healthy),
-            ("i3", "c", "http://127.0.0.1:3", &["secret"], RegistryStatus::Unhealthy),
+            (
+                "i1",
+                "a",
+                "http://127.0.0.1:1",
+                &["research", "write"],
+                RegistryStatus::Healthy,
+            ),
+            (
+                "i2",
+                "b",
+                "http://127.0.0.1:2",
+                &["write"],
+                RegistryStatus::Healthy,
+            ),
+            (
+                "i3",
+                "c",
+                "http://127.0.0.1:3",
+                &["secret"],
+                RegistryStatus::Unhealthy,
+            ),
         ])
         .await;
         let orch = Orchestrator::new(store);

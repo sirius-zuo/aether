@@ -1,5 +1,11 @@
 use aether_core::{Envelope, EnvelopeKind};
-use axum::{extract::Json, http::StatusCode, response::IntoResponse, routing::{get, post}, Router};
+use axum::{
+    extract::Json,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -23,10 +29,16 @@ async fn main() {
 }
 
 async fn handle_invoke(Json(env): Json<Envelope>) -> impl IntoResponse {
-    let response = Envelope { kind: EnvelopeKind::Result, ..env };
+    let response = Envelope {
+        kind: EnvelopeKind::Result,
+        ..env
+    };
     (StatusCode::OK, Json(response))
 }
 
 async fn handle_health() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({"status": "healthy"})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "healthy"})),
+    )
 }

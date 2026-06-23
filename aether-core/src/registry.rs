@@ -1,6 +1,6 @@
+use crate::AgentNode;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use crate::AgentNode;
 
 #[derive(Clone, Default)]
 pub struct AgentRegistry {
@@ -38,12 +38,12 @@ impl AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentNode, FailurePolicy, SpawnPolicy};
     use crate::transport::AgentFactory;
     use crate::{AetherError, Transport};
+    use crate::{AgentNode, FailurePolicy, SpawnPolicy};
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
-    use async_trait::async_trait;
 
     struct DummyFactory;
     #[async_trait]

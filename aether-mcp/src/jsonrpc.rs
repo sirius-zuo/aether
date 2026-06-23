@@ -34,14 +34,22 @@ pub struct JsonRpcResponse {
 
 impl JsonRpcResponse {
     pub fn result(id: Option<Value>, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     pub fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(JsonRpcError { code, message: message.into() }),
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
@@ -84,11 +92,14 @@ fn tool_content(value: Value) -> Value {
 pub async fn handle_request(engine: &McpEngine, req: JsonRpcRequest) -> JsonRpcResponse {
     let id = req.id.clone();
     match req.method.as_str() {
-        "initialize" => JsonRpcResponse::result(id, json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "aether-mcp", "version": env!("CARGO_PKG_VERSION") }
-        })),
+        "initialize" => JsonRpcResponse::result(
+            id,
+            json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "aether-mcp", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        ),
         "tools/list" => JsonRpcResponse::result(id, json!({ "tools": tool_descriptors() })),
         "tools/call" => handle_tool_call(engine, id, req.params).await,
         _ => JsonRpcResponse::error(id, -32601, format!("method not found: {}", req.method)),
@@ -96,8 +107,14 @@ pub async fn handle_request(engine: &McpEngine, req: JsonRpcRequest) -> JsonRpcR
 }
 
 async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) -> JsonRpcResponse {
-    let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     match name {
         "submit_goal" => {
@@ -106,16 +123,24 @@ async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) 
                 None => return JsonRpcResponse::error(id, -32602, "missing 'goal' argument"),
             };
             let workflow_id = engine.submit_goal(goal);
-            JsonRpcResponse::result(id, tool_content(json!({ "workflow_id": workflow_id.to_string() })))
+            JsonRpcResponse::result(
+                id,
+                tool_content(json!({ "workflow_id": workflow_id.to_string() })),
+            )
         }
         "get_result" => {
-            let raw = args.get("workflow_id").and_then(Value::as_str).unwrap_or_default();
+            let raw = args
+                .get("workflow_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let parsed = match uuid::Uuid::parse_str(raw) {
                 Ok(u) => u,
                 Err(_) => return JsonRpcResponse::error(id, -32602, "invalid 'workflow_id'"),
             };
             match engine.get_result(parsed) {
-                Some(state) => JsonRpcResponse::result(id, tool_content(serde_json::to_value(state).unwrap())),
+                Some(state) => {
+                    JsonRpcResponse::result(id, tool_content(serde_json::to_value(state).unwrap()))
+                }
                 None => JsonRpcResponse::result(id, tool_content(json!({ "status": "unknown" }))),
             }
         }
@@ -142,8 +167,10 @@ mod tests {
     #[tokio::test]
     async fn initialize_returns_server_info() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: Some(json!(1)),
-            method: "initialize".into(), params: json!({}),
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "initialize".into(),
+            params: json!({}),
         };
         let resp = handle_request(&engine(), req).await;
         let result = resp.result.unwrap();
@@ -154,8 +181,10 @@ mod tests {
     #[tokio::test]
     async fn tools_list_lists_three_tools() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: Some(json!(2)),
-            method: "tools/list".into(), params: json!({}),
+            jsonrpc: "2.0".into(),
+            id: Some(json!(2)),
+            method: "tools/list".into(),
+            params: json!({}),
         };
         let resp = handle_request(&engine(), req).await;
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
@@ -168,8 +197,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_returns_method_not_found() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: Some(json!(3)),
-            method: "nope".into(), params: json!({}),
+            jsonrpc: "2.0".into(),
+            id: Some(json!(3)),
+            method: "nope".into(),
+            params: json!({}),
         };
         let resp = handle_request(&engine(), req).await;
         assert_eq!(resp.error.unwrap().code, -32601);
@@ -178,12 +209,16 @@ mod tests {
     #[tokio::test]
     async fn tools_call_list_capabilities_returns_empty_array() {
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: Some(json!(4)),
+            jsonrpc: "2.0".into(),
+            id: Some(json!(4)),
             method: "tools/call".into(),
             params: json!({ "name": "list_capabilities", "arguments": {} }),
         };
         let resp = handle_request(&engine(), req).await;
-        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["capabilities"], json!([]));
     }
