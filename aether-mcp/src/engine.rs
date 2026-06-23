@@ -18,13 +18,15 @@ impl McpEngine {
         }
     }
 
-    /// Spawn the orchestrator run in the background; return a poll handle immediately.
+    /// Spawn the orchestrator run in the background; return the `workflow_id`
+    /// immediately. The same id keys the job, drives the run, and tags every
+    /// `SupervisorEvent` the run emits, so the poll handle is the workflow id.
     pub fn submit_goal(&self, goal: serde_json::Value) -> uuid::Uuid {
         let id = self.jobs.create();
         let orchestrator = self.orchestrator.clone();
         let jobs = self.jobs.clone();
         tokio::spawn(async move {
-            let outcome = orchestrator.submit(goal).await;
+            let outcome = orchestrator.submit_with_id(id, goal).await;
             jobs.complete(id, outcome);
         });
         id

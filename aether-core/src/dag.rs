@@ -40,8 +40,10 @@ impl DagSpec {
     }
 
     /// Structural validation: non-empty, unique ids, resolvable deps, each node has
-    /// a capability or an agent pin, and exactly one entry node (empty `depends_on`).
-    /// Cycle detection is left to `WorkflowBuilder::build`.
+    /// a capability or an agent pin, exactly one entry node (empty `depends_on`), and
+    /// exactly one terminal node (depended on by nothing). The single terminal makes
+    /// the workflow's final result well-defined. Cycle detection is left to
+    /// `WorkflowBuilder::build`.
     pub fn validate(&self) -> Result<(), AetherError> {
         let err = |m: String| AetherError::WorkflowError { message: m };
         if self.nodes.is_empty() {
@@ -77,6 +79,21 @@ impl DagSpec {
         if entries != 1 {
             return Err(err(format!(
                 "DAG must have exactly one entry node (found {entries})"
+            )));
+        }
+        let referenced: std::collections::HashSet<&str> = self
+            .nodes
+            .iter()
+            .flat_map(|n| n.depends_on.iter().map(String::as_str))
+            .collect();
+        let terminals = self
+            .nodes
+            .iter()
+            .filter(|n| !referenced.contains(n.id.as_str()))
+            .count();
+        if terminals != 1 {
+            return Err(err(format!(
+                "DAG must have exactly one terminal node (found {terminals})"
             )));
         }
         Ok(())
@@ -189,5 +206,31 @@ mod tests {
             d.validate(),
             Err(AetherError::WorkflowError { .. })
         ));
+    }
+
+    #[test]
+    fn validate_rejects_multiple_terminals() {
+        // One entry (a) fanning out to two leaves (b, c) — ambiguous final result.
+        let d = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] },
+            { "id": "b", "capability": "y", "depends_on": ["a"] },
+            { "id": "c", "capability": "z", "depends_on": ["a"] }
+        ]));
+        assert!(matches!(
+            d.validate(),
+            Err(AetherError::WorkflowError { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_fan_in_to_single_terminal() {
+        // Diamond: a -> {b, c} -> d. Single entry, single terminal.
+        let d = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] },
+            { "id": "b", "capability": "y", "depends_on": ["a"] },
+            { "id": "c", "capability": "z", "depends_on": ["a"] },
+            { "id": "d", "capability": "w", "depends_on": ["b", "c"] }
+        ]));
+        assert!(d.validate().is_ok());
     }
 }

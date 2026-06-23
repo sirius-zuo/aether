@@ -753,9 +753,9 @@ Pre-execution failures (no planner found, bad DAG JSON, missing capability, cycl
 
 The `aether-mcp` crate exposes goal dispatch over MCP (Model Context Protocol) as a JSON-RPC 2.0 server. It supports two transports:
 
-**stdio** (default): reads one JSON-RPC request per line from stdin, writes responses to stdout.
+**stdio** (default): reads one JSON-RPC request per line from stdin, writes responses to stdout. Notifications (requests without an `id`) produce no output.
 
-**HTTP**: POST a JSON-RPC request to `/:port` (default `7800`).
+**HTTP** (MCP Streamable HTTP): POST a JSON-RPC request to `/` (port `7800` by default) and receive a JSON response. Notifications return `202 Accepted` with no body; a malformed body returns a JSON-RPC `-32700` parse error. The server initiates no messages, so `GET /` (the optional server→client SSE channel) returns `405 Method Not Allowed`.
 
 **Environment variables:**
 

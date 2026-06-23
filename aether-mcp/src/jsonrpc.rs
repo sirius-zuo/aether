@@ -88,10 +88,26 @@ fn tool_content(value: Value) -> Value {
     json!({ "content": [ { "type": "text", "text": value.to_string() } ] })
 }
 
-/// Dispatch a single JSON-RPC request.
-pub async fn handle_request(engine: &McpEngine, req: JsonRpcRequest) -> JsonRpcResponse {
-    let id = req.id.clone();
-    match req.method.as_str() {
+/// Parse and dispatch one raw JSON-RPC message. Returns `None` when no reply is
+/// owed (a notification); a parse failure yields a `-32700` error response.
+pub async fn handle_message(engine: &McpEngine, raw: &str) -> Option<JsonRpcResponse> {
+    match serde_json::from_str::<JsonRpcRequest>(raw) {
+        Ok(req) => handle_request(engine, req).await,
+        Err(e) => Some(JsonRpcResponse::error(
+            None,
+            -32700,
+            format!("parse error: {e}"),
+        )),
+    }
+}
+
+/// Dispatch a single parsed JSON-RPC request. A request without an `id` is a
+/// notification: per JSON-RPC 2.0 §4.1 the server must not reply, so this returns
+/// `None`.
+pub async fn handle_request(engine: &McpEngine, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
+    let id = req.id.clone()?;
+    let id = Some(id);
+    Some(match req.method.as_str() {
         "initialize" => JsonRpcResponse::result(
             id,
             json!({
@@ -103,7 +119,7 @@ pub async fn handle_request(engine: &McpEngine, req: JsonRpcRequest) -> JsonRpcR
         "tools/list" => JsonRpcResponse::result(id, json!({ "tools": tool_descriptors() })),
         "tools/call" => handle_tool_call(engine, id, req.params).await,
         _ => JsonRpcResponse::error(id, -32601, format!("method not found: {}", req.method)),
-    }
+    })
 }
 
 async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) -> JsonRpcResponse {
@@ -172,7 +188,7 @@ mod tests {
             method: "initialize".into(),
             params: json!({}),
         };
-        let resp = handle_request(&engine(), req).await;
+        let resp = handle_request(&engine(), req).await.unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["serverInfo"]["name"], "aether-mcp");
         assert!(result["capabilities"]["tools"].is_object());
@@ -186,7 +202,7 @@ mod tests {
             method: "tools/list".into(),
             params: json!({}),
         };
-        let resp = handle_request(&engine(), req).await;
+        let resp = handle_request(&engine(), req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"submit_goal"));
@@ -202,8 +218,26 @@ mod tests {
             method: "nope".into(),
             params: json!({}),
         };
-        let resp = handle_request(&engine(), req).await;
+        let resp = handle_request(&engine(), req).await.unwrap();
         assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn notification_without_id_gets_no_response() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: "notifications/initialized".into(),
+            params: json!({}),
+        };
+        assert!(handle_request(&engine(), req).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_error_yields_error_response_with_null_id() {
+        let resp = handle_message(&engine(), "not json").await.unwrap();
+        assert_eq!(resp.error.unwrap().code, -32700);
+        assert!(resp.id.is_none());
     }
 
     #[tokio::test]
@@ -214,7 +248,7 @@ mod tests {
             method: "tools/call".into(),
             params: json!({ "name": "list_capabilities", "arguments": {} }),
         };
-        let resp = handle_request(&engine(), req).await;
+        let resp = handle_request(&engine(), req).await.unwrap();
         let text = resp.result.unwrap()["content"][0]["text"]
             .as_str()
             .unwrap()

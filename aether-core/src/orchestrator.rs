@@ -38,32 +38,33 @@ fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>
     }
 }
 
+/// First healthy instance in `entries` advertising `capability`.
+fn find_capable<'a>(
+    entries: &'a [RegistrationEntry],
+    capability: &str,
+) -> Option<&'a RegistrationEntry> {
+    entries.iter().find(|e| {
+        e.status == RegistryStatus::Healthy && e.capabilities.iter().any(|c| c == capability)
+    })
+}
+
+/// First healthy instance in `entries` registered under `name`.
+fn find_named<'a>(entries: &'a [RegistrationEntry], name: &str) -> Option<&'a RegistrationEntry> {
+    entries
+        .iter()
+        .find(|e| e.status == RegistryStatus::Healthy && e.name == name)
+}
+
 /// First healthy instance advertising `capability`, else `RegistryError`.
 async fn resolve_capability(
     store: &RegistryStore,
     capability: &str,
 ) -> Result<RegistrationEntry, AetherError> {
     let all = store.list_all().await?;
-    all.into_iter()
-        .find(|e| {
-            e.status == RegistryStatus::Healthy && e.capabilities.iter().any(|c| c == capability)
-        })
+    find_capable(&all, capability)
+        .cloned()
         .ok_or_else(|| AetherError::RegistryError {
             message: format!("no healthy agent for capability '{capability}'"),
-        })
-}
-
-/// First healthy instance registered under `name`, else `RegistryError`.
-async fn resolve_agent(
-    store: &RegistryStore,
-    name: &str,
-) -> Result<RegistrationEntry, AetherError> {
-    let instances = store.list_by_name(name).await?;
-    instances
-        .into_iter()
-        .find(|e| e.status == RegistryStatus::Healthy)
-        .ok_or_else(|| AetherError::RegistryError {
-            message: format!("no healthy instance for agent '{name}'"),
         })
 }
 
@@ -75,16 +76,22 @@ async fn build_registry_and_workflow(
 ) -> Result<(AgentRegistry, Workflow), AetherError> {
     dag.validate()?;
 
+    // One registry snapshot for the whole DAG — every node resolves against it.
+    let all = store.list_all().await?;
     let registry = AgentRegistry::new();
     for node in &dag.nodes {
         let entry = if let Some(agent) = &node.agent {
-            resolve_agent(store, agent).await?
+            find_named(&all, agent).ok_or_else(|| AetherError::RegistryError {
+                message: format!("no healthy instance for agent '{agent}'"),
+            })?
         } else {
             let cap = node
                 .capability
                 .as_deref()
                 .expect("validated node has capability");
-            resolve_capability(store, cap).await?
+            find_capable(&all, cap).ok_or_else(|| AetherError::RegistryError {
+                message: format!("no healthy agent for capability '{cap}'"),
+            })?
         };
         registry.register(registration_to_node(
             &node.id,
@@ -117,6 +124,12 @@ impl Orchestrator {
     /// Submit a goal. Resolves the `"plan"` capability, asks that agent for a DAG,
     /// builds and runs the workflow. Pre-execution failures map to `Outcome::Failed`.
     pub async fn submit(&self, goal: Value) -> Outcome {
+        self.submit_with_id(uuid::Uuid::new_v4(), goal).await
+    }
+
+    /// Like [`submit`], but runs under a caller-supplied `workflow_id` so a poller
+    /// can hold the id before completion and correlate it with `SupervisorEvent`s.
+    pub async fn submit_with_id(&self, workflow_id: uuid::Uuid, goal: Value) -> Outcome {
         let planner = match resolve_capability(&self.store, "plan").await {
             Ok(p) => p,
             Err(e) => {
@@ -165,7 +178,9 @@ impl Orchestrator {
             }
         };
 
-        Supervisor::new(registry).run(&workflow, goal).await
+        Supervisor::new(registry)
+            .run_with_id(workflow_id, &workflow, goal)
+            .await
     }
 
     /// Sorted, de-duplicated capabilities advertised by healthy instances.
@@ -287,7 +302,8 @@ mod tests {
             ),
         ])
         .await;
-        let e = resolve_agent(&store, "writer").await.unwrap();
+        let all = store.list_all().await.unwrap();
+        let e = find_named(&all, "writer").unwrap();
         assert_eq!(e.instance_id, "i1");
     }
 

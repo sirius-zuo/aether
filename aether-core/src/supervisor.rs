@@ -80,7 +80,19 @@ impl Supervisor {
     }
 
     pub async fn run(&self, workflow: &Workflow, initial_payload: serde_json::Value) -> Outcome {
-        let workflow_id = Uuid::new_v4();
+        self.run_with_id(Uuid::new_v4(), workflow, initial_payload)
+            .await
+    }
+
+    /// Like [`run`], but with a caller-supplied `workflow_id` so the id can be
+    /// surfaced to a poller (e.g. the MCP sidecar) before the run completes and
+    /// correlated with the emitted `SupervisorEvent`s.
+    pub async fn run_with_id(
+        &self,
+        workflow_id: Uuid,
+        workflow: &Workflow,
+        initial_payload: serde_json::Value,
+    ) -> Outcome {
         let trace_id = Uuid::new_v4();
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowStarted {

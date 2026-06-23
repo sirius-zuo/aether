@@ -3,15 +3,14 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::engine::McpEngine;
-use crate::jsonrpc::{handle_request, JsonRpcRequest, JsonRpcResponse};
+use crate::jsonrpc::handle_message;
 
-/// Process one line of input into a serialized JSON-RPC response line.
-pub async fn process_line(engine: &McpEngine, line: &str) -> String {
-    let resp = match serde_json::from_str::<JsonRpcRequest>(line) {
-        Ok(req) => handle_request(engine, req).await,
-        Err(e) => JsonRpcResponse::error(None, -32700, format!("parse error: {e}")),
-    };
-    serde_json::to_string(&resp).expect("response serializes")
+/// Process one line of input into a serialized JSON-RPC response line. Returns
+/// `None` when the message is a notification that owes no reply.
+pub async fn process_line(engine: &McpEngine, line: &str) -> Option<String> {
+    handle_message(engine, line)
+        .await
+        .map(|resp| serde_json::to_string(&resp).expect("response serializes"))
 }
 
 /// Serve MCP over stdio until EOF.
@@ -22,10 +21,11 @@ pub async fn serve_stdio(engine: McpEngine) -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let mut out = process_line(&engine, &line).await;
-        out.push('\n');
-        stdout.write_all(out.as_bytes()).await?;
-        stdout.flush().await?;
+        if let Some(mut out) = process_line(&engine, &line).await {
+            out.push('\n');
+            stdout.write_all(out.as_bytes()).await?;
+            stdout.flush().await?;
+        }
     }
     Ok(())
 }
@@ -43,14 +43,20 @@ mod tests {
     #[tokio::test]
     async fn process_line_handles_initialize() {
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let out = process_line(&engine(), line).await;
+        let out = process_line(&engine(), line).await.unwrap();
         assert!(out.contains("aether-mcp"));
     }
 
     #[tokio::test]
     async fn process_line_reports_parse_error() {
-        let out = process_line(&engine(), "not json").await;
+        let out = process_line(&engine(), "not json").await.unwrap();
         assert!(out.contains("parse error"));
         assert!(out.contains("-32700"));
+    }
+
+    #[tokio::test]
+    async fn process_line_suppresses_notifications() {
+        let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(process_line(&engine(), line).await.is_none());
     }
 }
