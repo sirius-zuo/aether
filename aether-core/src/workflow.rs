@@ -56,6 +56,14 @@ pub struct WorkflowBuilder {
 }
 
 impl WorkflowBuilder {
+    /// Set the entry node explicitly. Lets you build single-node workflows and
+    /// workflows whose entry is not the first edge's source. Takes precedence —
+    /// `edge` only auto-sets the entry when none has been set.
+    pub fn entry(mut self, node: &str) -> Self {
+        self.entry = Some(node.to_string());
+        self
+    }
+
     /// Add an unconditional edge. The first `from` node becomes the entry.
     pub fn edge(mut self, from: &str, to: &str) -> Self {
         if self.entry.is_none() {
@@ -206,6 +214,27 @@ mod tests {
         let r = AgentRegistry::new();
         for &n in names { r.register(mk_node(n)); }
         r
+    }
+
+    #[test]
+    fn explicit_entry_single_node_builds() {
+        let r = reg(&["solo"]);
+        let wf = Workflow::builder(&r).entry("solo").build().unwrap();
+        assert_eq!(wf.entry, "solo");
+        assert_eq!(wf.edges.len(), 0);
+    }
+
+    #[test]
+    fn explicit_entry_preserved_when_edges_added() {
+        let r = reg(&["root", "a", "b"]);
+        let wf = Workflow::builder(&r)
+            .entry("root")
+            .edge("root", "a")
+            .edge("root", "b")
+            .build()
+            .unwrap();
+        assert_eq!(wf.entry, "root");
+        assert_eq!(wf.edges.len(), 2);
     }
 
     #[test]
