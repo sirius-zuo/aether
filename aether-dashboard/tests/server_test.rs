@@ -1,8 +1,8 @@
-use aether_core::{
-    AgentNode, AgentRegistry, AetherError, Envelope,
-    FailurePolicy, SpawnPolicy, Supervisor, Transport,
-};
 use aether_core::transport::AgentFactory;
+use aether_core::{
+    AetherError, AgentNode, AgentRegistry, Envelope, FailurePolicy, SpawnPolicy, Supervisor,
+    Transport,
+};
 use aether_dashboard::{AppState, DashboardConfig};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -14,7 +14,10 @@ struct EchoTransport;
 impl Transport for EchoTransport {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
         use aether_core::EnvelopeKind;
-        Ok(Envelope { kind: EnvelopeKind::Result, ..msg })
+        Ok(Envelope {
+            kind: EnvelopeKind::Result,
+            ..msg
+        })
     }
     async fn shutdown(&self, _: Duration) {}
 }
@@ -38,12 +41,20 @@ async fn start_test_server() -> (Arc<AppState>, u16) {
         failure: FailurePolicy::default(),
         timeout: Duration::from_secs(5),
         shutdown_grace: Duration::from_secs(1),
-        metadata: std::collections::HashMap::from([("model".to_string(), "claude-opus-4-7".to_string())]),
+        metadata: std::collections::HashMap::from([(
+            "model".to_string(),
+            "claude-opus-4-7".to_string(),
+        )]),
     });
     let supervisor = Arc::new(Supervisor::new(reg));
     let state = AppState::new(Arc::clone(&supervisor));
-    let config = DashboardConfig { port: 0, auth_token: None };
-    let addr = aether_dashboard::start(Arc::clone(&state), config).await.unwrap();
+    let config = DashboardConfig {
+        port: 0,
+        auth_token: None,
+    };
+    let addr = aether_dashboard::start(Arc::clone(&state), config)
+        .await
+        .unwrap();
     (state, addr.port())
 }
 
@@ -51,17 +62,24 @@ async fn start_test_server() -> (Arc<AppState>, u16) {
 async fn get_index_returns_html() {
     let (_, port) = start_test_server().await;
     let body = reqwest::get(format!("http://127.0.0.1:{port}/"))
-        .await.unwrap()
-        .text().await.unwrap();
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(body.contains("Aether Dashboard"));
 }
 
 #[tokio::test]
 async fn get_agents_returns_json_with_registered_agent() {
     let (_, port) = start_test_server().await;
-    let agents: Vec<serde_json::Value> = reqwest::get(format!("http://127.0.0.1:{port}/api/agents"))
-        .await.unwrap()
-        .json().await.unwrap();
+    let agents: Vec<serde_json::Value> =
+        reqwest::get(format!("http://127.0.0.1:{port}/api/agents"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["name"], "test-agent");
 }
@@ -71,13 +89,17 @@ async fn auth_token_blocks_unauthenticated_requests() {
     let reg = AgentRegistry::new();
     let supervisor = Arc::new(Supervisor::new(reg));
     let state = AppState::new(supervisor);
-    let config = DashboardConfig { port: 0, auth_token: Some("secret".to_string()) };
+    let config = DashboardConfig {
+        port: 0,
+        auth_token: Some("secret".to_string()),
+    };
     let addr = aether_dashboard::start(state, config).await.unwrap();
     let port = addr.port();
 
     // Without token: 401
     let status = reqwest::get(format!("http://127.0.0.1:{port}/api/agents"))
-        .await.unwrap()
+        .await
+        .unwrap()
         .status();
     assert_eq!(status.as_u16(), 401);
 
@@ -85,7 +107,9 @@ async fn auth_token_blocks_unauthenticated_requests() {
     let status = reqwest::Client::new()
         .get(format!("http://127.0.0.1:{port}/api/agents"))
         .header("Authorization", "Bearer secret")
-        .send().await.unwrap()
+        .send()
+        .await
+        .unwrap()
         .status();
     assert_eq!(status.as_u16(), 200);
 }

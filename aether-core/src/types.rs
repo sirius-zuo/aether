@@ -1,7 +1,7 @@
+use crate::transport::AgentFactory;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::transport::AgentFactory;
 
 #[derive(Debug, Clone)]
 pub enum SpawnPolicy {

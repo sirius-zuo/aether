@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::sync::Arc;
+use crate::state::{AppState, WorkflowInfo};
+use aether_core::{Outcome, SupervisorEvent};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,11 +9,11 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::Arc;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-use aether_core::{Outcome, SupervisorEvent};
-use crate::state::{AppState, WorkflowInfo};
 
 #[derive(Debug, Clone)]
 pub struct DashboardConfig {
@@ -24,7 +24,10 @@ pub struct DashboardConfig {
 
 impl Default for DashboardConfig {
     fn default() -> Self {
-        Self { port: 7700, auth_token: None }
+        Self {
+            port: 7700,
+            auth_token: None,
+        }
     }
 }
 
@@ -41,13 +44,19 @@ pub async fn start(
                 match &event {
                     SupervisorEvent::WorkflowStarted { workflow_id, entry } => {
                         let mut wfs = state_bg.active_workflows.lock().unwrap();
-                        wfs.insert(workflow_id.to_string(), WorkflowInfo {
-                            workflow_id: workflow_id.to_string(),
-                            entry: entry.clone(),
-                            status: "running".to_string(),
-                        });
+                        wfs.insert(
+                            workflow_id.to_string(),
+                            WorkflowInfo {
+                                workflow_id: workflow_id.to_string(),
+                                entry: entry.clone(),
+                                status: "running".to_string(),
+                            },
+                        );
                     }
-                    SupervisorEvent::WorkflowFinished { workflow_id, result } => {
+                    SupervisorEvent::WorkflowFinished {
+                        workflow_id,
+                        result,
+                    } => {
                         let status = match result {
                             Outcome::Success(_) => "done",
                             Outcome::Timeout { .. } => "timeout",
@@ -78,7 +87,9 @@ pub async fn start(
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", config.port)).await?;
     let addr = listener.local_addr()?;
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
     Ok(addr)
 }
 

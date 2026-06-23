@@ -1,6 +1,6 @@
+use crate::{AetherError, AgentRegistry, Envelope};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::{AetherError, AgentRegistry, Envelope};
 
 pub type EdgePredicate = Arc<dyn Fn(&Envelope) -> bool + Send + Sync>;
 
@@ -56,12 +56,24 @@ pub struct WorkflowBuilder {
 }
 
 impl WorkflowBuilder {
+    /// Set the entry node explicitly. Lets you build single-node workflows and
+    /// workflows whose entry is not the first edge's source. Takes precedence —
+    /// `edge` only auto-sets the entry when none has been set.
+    pub fn entry(mut self, node: &str) -> Self {
+        self.entry = Some(node.to_string());
+        self
+    }
+
     /// Add an unconditional edge. The first `from` node becomes the entry.
     pub fn edge(mut self, from: &str, to: &str) -> Self {
         if self.entry.is_none() {
             self.entry = Some(from.to_string());
         }
-        self.edges.push(Edge { from: from.to_string(), to: to.to_string(), when: None });
+        self.edges.push(Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            when: None,
+        });
         self
     }
 
@@ -128,7 +140,10 @@ impl WorkflowBuilder {
         // Cycle detection via DFS
         detect_cycle(&entry, &self.edges)?;
 
-        Ok(Workflow { entry, edges: self.edges })
+        Ok(Workflow {
+            entry,
+            edges: self.edges,
+        })
     }
 }
 
@@ -177,16 +192,18 @@ fn dfs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentNode, AgentRegistry, AetherError, FailurePolicy, SpawnPolicy, Transport};
     use crate::transport::AgentFactory;
+    use crate::{AetherError, AgentNode, AgentRegistry, FailurePolicy, SpawnPolicy, Transport};
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
-    use async_trait::async_trait;
 
     struct DummyFactory;
     #[async_trait]
     impl AgentFactory for DummyFactory {
-        async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> { unimplemented!() }
+        async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+            unimplemented!()
+        }
     }
 
     fn mk_node(name: &str) -> AgentNode {
@@ -204,8 +221,31 @@ mod tests {
 
     fn reg(names: &[&str]) -> AgentRegistry {
         let r = AgentRegistry::new();
-        for &n in names { r.register(mk_node(n)); }
+        for &n in names {
+            r.register(mk_node(n));
+        }
         r
+    }
+
+    #[test]
+    fn explicit_entry_single_node_builds() {
+        let r = reg(&["solo"]);
+        let wf = Workflow::builder(&r).entry("solo").build().unwrap();
+        assert_eq!(wf.entry, "solo");
+        assert_eq!(wf.edges.len(), 0);
+    }
+
+    #[test]
+    fn explicit_entry_preserved_when_edges_added() {
+        let r = reg(&["root", "a", "b"]);
+        let wf = Workflow::builder(&r)
+            .entry("root")
+            .edge("root", "a")
+            .edge("root", "b")
+            .build()
+            .unwrap();
+        assert_eq!(wf.entry, "root");
+        assert_eq!(wf.edges.len(), 2);
     }
 
     #[test]

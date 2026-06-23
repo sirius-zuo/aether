@@ -2,34 +2,28 @@
 
 Multi-agent orchestration framework in Rust.
 
-Aether composes independent AI agents — each running as a separate process — into DAG-based workflows. It handles process lifecycle, load balancing, failure recovery, routing, and real-time observability. Any agent that speaks the Envelope wire protocol can be driven by Aether, regardless of language or framework.
+Aether composes independent AI agents — each running as a separate HTTP service — into DAG-based workflows. It handles load balancing, failure recovery, routing, and real-time observability. Any agent that speaks the Envelope wire protocol over HTTP can be driven by Aether, regardless of language or framework.
 
 ## Quick Start
 
 ### Prerequisites
 
 - **Rust 1.82+** — `rustup install stable`
-- **An agent binary** that speaks the Envelope protocol (see [AgentVerse](https://github.com/sirius-zuo/agentverse) for a ready-made one)
+- **Two HTTP agent processes** listening on separate ports that implement the [Envelope HTTP protocol](#wire-protocol--envelope)
 
 ### Run the bundled example
 
 ```bash
-# Step 1 — build the AgentVerse agent binary (one time)
-cd /path/to/AgentVerse && cargo build -p agentverse-server
-
-# Step 2 — run the two-node pipeline example
-cd /path/to/aether
-AGENTVERSE_BIN=/path/to/AgentVerse/target/debug/agentverse \
-MODEL_API_KEY=sk-xxx                                        \
-MODEL_BASE_URL=http://localhost:9090/v1                     \
-MODEL_NAME=your-model                                       \
-cargo run -p example-agentverse-pipeline
+# Start your two HTTP agents on separate ports, then:
+ANALYST_URL=http://127.0.0.1:8080 \
+WRITER_URL=http://127.0.0.1:8081  \
+cargo run -p example-agentverse-pipeline -- "Your prompt here"
 
 # Open the live dashboard
 open http://127.0.0.1:7700
 ```
 
-The example runs a two-node pipeline (`analyst → writer`) where each node is a live AgentVerse agent process. The dashboard shows registered agents, active workflows, and a live event log.
+The example runs a two-node pipeline (`analyst → writer`) where each node is a live HTTP agent. The dashboard shows registered agents, active workflows, and a live event log.
 
 ### Minimal code example
 
@@ -37,8 +31,7 @@ The example runs a two-node pipeline (`analyst → writer`) where each node is a
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use aether_core::{AgentNode, AgentRegistry, FailurePolicy, Outcome, SpawnPolicy, Supervisor, Workflow};
-use aether_core::transport::StdioFactory;
+use aether_core::{AgentNode, AgentRegistry, FailurePolicy, HttpAgentFactory, Outcome, SpawnPolicy, Supervisor, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -47,14 +40,9 @@ async fn main() {
     registry.register(AgentNode {
         name: "assistant".to_string(),
         capabilities: vec!["answer".to_string()],
-        factory: Arc::new(StdioFactory {
+        factory: Arc::new(HttpAgentFactory {
             node_name: "assistant".to_string(),
-            command: "/path/to/agentverse".to_string(),
-            args: vec!["--stdio".to_string()],
-            envs: HashMap::from([
-                ("MODEL_API_KEY".to_string(), "sk-xxx".to_string()),
-                ("MODEL_BASE_URL".to_string(), "http://localhost:9090/v1".to_string()),
-            ]),
+            http_url: "http://127.0.0.1:8080".to_string(),
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy::default(),
@@ -79,7 +67,16 @@ async fn main() {
 
 ## Wire Protocol — Envelope
 
-The sole contract between Aether and any agent. Newline-delimited JSON.
+The sole contract between Aether and any agent. Agents expose an HTTP endpoint; Aether posts an `Envelope` JSON body and expects an `Envelope` JSON response.
+
+**Agent HTTP contract:**
+
+```
+POST /aether/invoke   — receives Envelope, returns Envelope
+GET  /health          — returns any 2xx to signal healthy
+```
+
+**Envelope format:**
 
 ```json
 {"id":"<uuid>","kind":"invoke","payload":{"message":"..."},"metadata":{"trace_id":"...","workflow_id":"...","node":"..."}}
@@ -100,12 +97,12 @@ Aether sets `trace_id`, `workflow_id`, and `node` in outgoing envelopes and neve
 
 ### SpawnPolicy
 
-Controls how many agent processes exist and when they are created.
+Controls how many agent connections exist and when they are created.
 
-| Policy | Processes | Use case |
-|--------|-----------|----------|
+| Policy | Connections | Use case |
+|--------|-------------|----------|
 | `PerRequest` | 1 per task, torn down after | Stateless agents, isolation |
-| `Singleton { max_queue }` | 1 persistent, requests queue | Stateful agents, low memory |
+| `Singleton { max_queue }` | 1 persistent, requests queue | Stateful agents, low throughput |
 | `Pool { size }` | N persistent, round-robin | High-throughput, stateless |
 
 ### FailurePolicy
@@ -113,7 +110,7 @@ Controls how many agent processes exist and when they are created.
 ```rust
 FailurePolicy {
     retries: 2,               // retry the same instance up to N times
-    restart_on_failure: true, // respawn via AgentFactory, then retry
+    restart_on_failure: true, // recreate transport via AgentFactory, then retry
     fallback: Some("backup-agent".to_string()), // route here after retries exhausted
 }
 ```
@@ -154,6 +151,42 @@ tokio::spawn(async move {
 let outcome = supervisor.run(&workflow, payload).await;
 ```
 
+## Agent Registry
+
+`aether-core` ships a standalone `aether` registry binary that manages agent discovery and health monitoring.
+
+```bash
+# Start the registry (defaults: port 7070, db file aether.db, poll every 30s)
+cargo run -p aether-core --bin aether
+
+# Custom configuration
+AETHER_PORT=8090 AETHER_DB_PATH=/var/lib/aether.db AETHER_POLL_INTERVAL_SECS=15 \
+cargo run -p aether-core --bin aether
+```
+
+**Registry API:**
+
+```
+POST   /registry/agents                          — register an agent instance
+GET    /registry/agents?capability=<cap>         — list agents (optionally filtered)
+GET    /registry/agents/:name/instances          — list instances of a named agent
+GET    /registry/agents/:name/instances/:id      — get a specific instance
+DELETE /registry/instances/:id                   — deregister an instance
+POST   /registry/instances/:id/events            — push an event for an instance
+```
+
+Agent registration request body:
+```json
+{
+  "name": "analyst",
+  "http_url": "http://127.0.0.1:8080",
+  "capabilities": ["analyze"],
+  "metadata": {}
+}
+```
+
+The registry responds with an `instance_id` and `poll_interval_secs`. The registry's `HealthPoller` calls `GET /health` on every registered instance at the configured interval and marks instances `healthy`, `unhealthy`, or `unknown`.
+
 ## Dashboard
 
 `aether-dashboard` embeds an axum server with a live single-page UI.
@@ -177,7 +210,7 @@ println!("Dashboard: http://{addr}");
 - **DAG diagram** — Mermaid.js rendering of the workflow graph, updated live via SSE
 - **Event log** — live `SupervisorEvent` stream with timestamps
 
-**API endpoints (all read-only in Phase 1):**
+**API endpoints (all read-only):**
 
 ```
 GET /              → dashboard HTML
@@ -187,24 +220,72 @@ GET /api/workflows → JSON array of active workflow instances
 GET /api/workflows/:id/graph → Mermaid graph TD string
 ```
 
+## LLM Planning
+
+Aether can turn a natural-language goal into a workflow at run time. A **planner** agent — registered like any other agent, with the capability `"plan"` — receives the goal and emits a DAG as JSON. Aether validates it, resolves each node to a healthy agent from the registry, builds a `Workflow`, and runs it on the `Supervisor`. `aether-core` itself stays LLM-free; the "brain" is just another agent that speaks the Envelope protocol.
+
+```rust
+use aether_core::Orchestrator;
+use aether_core::registry_store::RegistryStore;
+
+let store = RegistryStore::open("aether.db")?;
+let outcome = Orchestrator::new(store)
+    .submit(serde_json::json!({ "goal": "analyze X" }))
+    .await; // Outcome::Success(final) or Outcome::Failed — never panics
+```
+
+The planner returns a `DagSpec` — a `nodes` array where each node has an `id`, a `capability` (or pinned `agent`), `depends_on` edges, and an optional `instruction`:
+
+```json
+{
+  "nodes": [
+    { "id": "n1", "capability": "research",   "depends_on": [],     "instruction": "Find recent papers on X" },
+    { "id": "n2", "capability": "synthesize", "depends_on": ["n1"], "instruction": "Summarize findings" }
+  ]
+}
+```
+
+A valid DAG has exactly one entry node (seeded with the goal) and one terminal node (whose output is the final result). See [DEVELOPMENT.md](DEVELOPMENT.md#dag-json-schema) for the full schema and validation rules.
+
+## MCP Server
+
+`aether-mcp` exposes goal dispatch over the Model Context Protocol (JSON-RPC 2.0) so other agents can drive Aether directly. It wraps the same `Orchestrator::submit` entry point behind three tools — `submit_goal`, `get_result`, `list_capabilities` — and runs over **stdio** (default) or **HTTP**.
+
+```bash
+# stdio (default)
+cargo run -p aether-mcp --bin aether-mcp
+
+# HTTP on port 7800
+AETHER_MCP_TRANSPORT=http cargo run -p aether-mcp --bin aether-mcp
+```
+
+`submit_goal` returns a `workflow_id` immediately; poll `get_result` with it until the run completes. See [DEVELOPMENT.md](DEVELOPMENT.md#aether-mcp) for the tool surface and transport details.
+
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `aether-core` | DAG engine, transports, registry, supervisor, instance manager |
+| `aether-core` | DAG engine, HTTP transport, registry store + server, health poller, supervisor, LLM-planning orchestrator |
 | `aether-dashboard` | Embedded axum server, SSE event stream, Mermaid.js UI |
+| `aether-mcp` | MCP (JSON-RPC 2.0) sidecar exposing goal dispatch over stdio / HTTP |
+
+## Binaries
+
+| Binary | Crate | Description |
+|--------|-------|-------------|
+| `aether` | `aether-core` | Standalone agent registry server with SQLite persistence and health polling |
+| `echo-agent` | `aether-core` | Test helper — echoes every Invoke as Result, responds to Ping with Pong |
+| `aether-mcp` | `aether-mcp` | MCP server bridging goal dispatch to the orchestrator (stdio / HTTP) |
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| `agentverse-pipeline` | Two-node `analyst → writer` pipeline driving AgentVerse agents over stdio |
+| `agentverse-pipeline` | Two-node `analyst → writer` pipeline driving HTTP agents |
 
 ```bash
-AGENTVERSE_BIN=/path/to/agentverse \
-MODEL_API_KEY=sk-xxx \
-MODEL_BASE_URL=http://localhost:9090/v1 \
-MODEL_NAME=your-model \
+ANALYST_URL=http://127.0.0.1:8080 \
+WRITER_URL=http://127.0.0.1:8081  \
 cargo run -p example-agentverse-pipeline -- "Your question here"
 ```
 
@@ -214,20 +295,26 @@ cargo run -p example-agentverse-pipeline -- "Your question here"
 aether/
 ├── aether-core/
 │   ├── src/
+│   │   ├── dag.rs               # DagSpec / DagNode — planner DAG JSON contract + validation
 │   │   ├── envelope.rs          # Envelope, EnvelopeKind, newline-delimited JSON codec
 │   │   ├── error.rs             # AetherError, Outcome
-│   │   ├── instance_manager.rs  # Process lifecycle — Singleton/Pool/PerRequest
+│   │   ├── health_poller.rs     # Periodic GET /health checker; marks instances healthy/unhealthy
+│   │   ├── instance_manager.rs  # Connection lifecycle — Singleton/Pool/PerRequest
+│   │   ├── orchestrator.rs      # LLM-free coordinator — goal → planner → DAG → Supervisor
 │   │   ├── registry.rs          # AgentRegistry — register/get/find_capable/list
+│   │   ├── registry_server.rs   # axum router for agent self-registration REST API
+│   │   ├── registry_store.rs    # SQLite-backed persistence for agent registrations
 │   │   ├── supervisor.rs        # DAG executor, FailurePolicy, SupervisorEvent stream
 │   │   ├── transport/
-│   │   │   ├── stdio.rs         # StdioTransport + StdioFactory
-│   │   │   └── unix.rs          # UnixSocketTransport + UnixSocketFactory
+│   │   │   ├── mod.rs           # Transport + AgentFactory traits
+│   │   │   └── http.rs          # HttpTransport + HttpAgentFactory (POST /aether/invoke)
 │   │   ├── types.rs             # AgentNode, SpawnPolicy, FailurePolicy, HealthStatus
 │   │   └── workflow.rs          # Workflow, Edge, WorkflowBuilder
 │   ├── src/bin/
+│   │   ├── aether.rs            # Standalone registry server binary
 │   │   └── echo_agent.rs        # Test helper — echoes Invoke as Result
 │   └── tests/
-│       └── integration.rs       # End-to-end tests with real echo-agent processes
+│       └── integration.rs       # End-to-end tests with inline axum HTTP servers
 ├── aether-dashboard/
 │   ├── src/
 │   │   ├── server.rs            # axum router, DashboardConfig, all handlers
@@ -235,8 +322,18 @@ aether/
 │   │   └── assets/index.html    # Single-page dashboard
 │   └── tests/
 │       └── server_test.rs       # Integration tests for HTTP endpoints and auth
+├── aether-mcp/
+│   ├── src/
+│   │   ├── engine.rs            # McpEngine — bridges MCP tools to the Orchestrator
+│   │   ├── job.rs               # JobStore — async submit/poll job tracking
+│   │   ├── jsonrpc.rs           # JSON-RPC 2.0 types + tool dispatch
+│   │   ├── stdio.rs             # stdio transport (line-delimited JSON-RPC)
+│   │   ├── http.rs              # HTTP transport (Streamable HTTP, JSON responses)
+│   │   └── bin/aether-mcp.rs    # MCP server binary, env-driven transport selection
+│   └── tests/
+│       └── engine.rs            # submit_goal → poll-to-completion test
 └── examples/
-    └── agentverse-pipeline/     # End-to-end example with AgentVerse
+    └── agentverse-pipeline/     # End-to-end example with two HTTP agents
 ```
 
 ## License
