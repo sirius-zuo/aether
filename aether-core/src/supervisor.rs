@@ -133,7 +133,7 @@ impl Supervisor {
 
                     // Aether sets trace_id/workflow_id/node — never trusts agent-supplied values
                     let envelope_id = Uuid::new_v4();
-                    let mut metadata = HashMap::new();
+                    let mut metadata: HashMap<String, String> = node.metadata.clone();
                     metadata.insert("trace_id".to_string(), workflow_id.to_string());
                     metadata.insert("workflow_id".to_string(), workflow_id.to_string());
                     metadata.insert("node".to_string(), node_name_c.clone());
@@ -375,6 +375,49 @@ mod tests {
         sup.run(&wf, serde_json::json!(null)).await;
         let event = rx.try_recv().unwrap();
         assert!(matches!(event, SupervisorEvent::WorkflowStarted { .. }));
+    }
+
+    #[tokio::test]
+    async fn node_metadata_is_forwarded_in_envelope() {
+        struct MetaEchoTransport;
+        #[async_trait]
+        impl Transport for MetaEchoTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                let meta = serde_json::to_value(&msg.metadata).unwrap();
+                Ok(Envelope { kind: EnvelopeKind::Result, payload: meta, ..msg })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct MetaEchoFactory;
+        #[async_trait]
+        impl AgentFactory for MetaEchoFactory {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(MetaEchoTransport))
+            }
+        }
+
+        let r = AgentRegistry::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("instruction".to_string(), "do-the-thing".to_string());
+        r.register(AgentNode {
+            name: "worker".to_string(), capabilities: vec![],
+            factory: Arc::new(MetaEchoFactory),
+            spawn: SpawnPolicy::PerRequest,
+            failure: FailurePolicy::default(),
+            timeout: Duration::from_secs(5),
+            shutdown_grace: Duration::from_secs(1),
+            metadata,
+        });
+        let wf = Workflow { entry: "worker".to_string(), edges: vec![] };
+        let sup = Supervisor::new(r);
+        let outcome = sup.run(&wf, serde_json::json!(null)).await;
+        match outcome {
+            Outcome::Success(v) => {
+                assert_eq!(v["instruction"], "do-the-thing");
+                assert!(v.get("node").is_some(), "reserved keys still present");
+            }
+            other => panic!("expected Success, got {:?}", other),
+        }
     }
 
     #[tokio::test]
