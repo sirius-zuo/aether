@@ -338,14 +338,14 @@ let workflow = Workflow::builder(&registry)
     .build()?;
 ```
 
-When multiple edges converge on the same node (fan-in), Aether waits for all incoming branches and passes a JSON array as the payload. **Array order matches edge declaration order** — this is a stable interface; downstream agents can index by position.
+When multiple edges converge on the same node (fan-in), Aether waits for all incoming branches and passes a JSON object keyed by upstream node ID. Downstream agents access each branch's result by name.
 
 ```json
 // writer receives:
-[
-  { "message": "researcher output" },
-  { "message": "fact-checker output" }
-]
+{
+  "researcher":   { "message": "researcher output" },
+  "fact-checker": { "message": "fact-checker output" }
+}
 ```
 
 ### Conditional routing
@@ -444,7 +444,7 @@ tokio::spawn(async move {
 
 | Event | Key fields | When |
 |-------|-----------|------|
-| `WorkflowStarted` | `workflow_id`, `entry` | `run()` called |
+| `WorkflowStarted` | `workflow_id`, `entries` | `run()` called |
 | `WorkflowFinished` | `workflow_id`, `result` | Terminal node returned |
 | `TaskDispatched` | `workflow_id`, `node`, `envelope_id` | Envelope sent to agent |
 | `TaskCompleted` | `workflow_id`, `node`, `elapsed` | Result received |
@@ -673,9 +673,9 @@ Every `Envelope` carries `trace_id` and `workflow_id` in metadata. Aether sets t
 - `RUST_LOG=aether_core=debug` will show per-task timing in the event log
 - Watch the dashboard event log for which node is stuck
 
-**Fan-in result order wrong:**
-- Array order in fan-in payloads matches **edge declaration order in the builder**, not completion order
-- Re-check your `.edge()` call sequence in `WorkflowBuilder`
+**Fan-in node receives unexpected payload shape:**
+- Fan-in payloads are a JSON object keyed by upstream node ID, not a positional array
+- Downstream agents should read `payload["upstream_node_id"]`, not `payload[0]`
 
 **Dashboard shows no events:**
 - Subscribe `supervisor.watch()` before calling `supervisor.run()` — events are not replayed
@@ -709,10 +709,11 @@ The planner contract is `DagSpec`, a JSON object with a `nodes` array. Each node
 | `agent` | `string` | Yes* | Optional pin to a specific agent by name (bypasses capability resolution) |
 | `depends_on` | `string[]` | Yes | IDs of upstream nodes; empty = entry node. A node no other node depends on is a terminal node |
 | `instruction` | `string` | No | Planner's per-node directive, carried into the Envelope metadata |
+| `metadata` | `object` | No | Flat `{ key: value }` string map for extra per-node configuration |
 
 `*` — exactly one of `capability` or `agent` must be set.
 
-The DAG has exactly one **entry** node (empty `depends_on`, seeded with the goal payload) and exactly one **terminal** node (depended on by nothing, whose output is the final result). A synthesizer is just a terminal node the planner chooses to emit; Aether does not special-case it.
+Any number of nodes with empty `depends_on` are **entry nodes** — all are seeded with the same goal payload and start concurrently. Any number of nodes not referenced by any `depends_on` are **terminal nodes** — `Outcome::Success` carries a `{ node_id: result }` map over all of them.
 
 **Example:**
 
@@ -730,8 +731,7 @@ Validation rules enforced by `DagSpec::validate()`:
 - No duplicate node IDs
 - All dependencies reference existing nodes
 - Every node has a `capability` or an `agent` pin
-- Exactly one entry node (empty `depends_on`)
-- Exactly one terminal node (no node depends on it), so the final result is unambiguous
+- At least one entry node (empty `depends_on`)
 - Cycle detection runs at `WorkflowBuilder::build()` time
 
 ### Orchestrator
@@ -823,7 +823,7 @@ The `aether-mcp` crate exposes goal dispatch over MCP (Model Context Protocol) a
 | `RegistryStatus` | `aether-core` | Unknown / Healthy / Unhealthy |
 | `HealthPoller` | `aether-core` | Background `GET /health` checker with failure threshold |
 | `DagSpec` | `aether-core` | Planned DAG: `nodes: Vec<DagNode>` |
-| `DagNode` | `aether-core` | Single DAG node: `id`, `capability`, `agent`, `depends_on`, `instruction` |
+| `DagNode` | `aether-core` | Single DAG node: `id`, `capability`, `agent`, `depends_on`, `instruction`, `metadata` |
 | `Orchestrator` | `aether-core` | `new(store)`, `submit(goal)`, `list_capabilities()` |
 | `JobState` | `aether-mcp` | `Running` / `Done { result: Outcome }` |
 | `JobStore` | `aether-mcp` | `new()`, `create()`, `complete()`, `get()` |

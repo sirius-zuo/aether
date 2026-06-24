@@ -58,7 +58,7 @@ async fn main() {
     let supervisor = Arc::new(Supervisor::new(registry));
 
     match supervisor.run(&workflow, serde_json::json!({"message": "Hello!"})).await {
-        Outcome::Success(result) => println!("{}", result["message"]),
+        Outcome::Success(result) => println!("{}", result["assistant"]["message"]),
         Outcome::Failed { node, error } => eprintln!("Failed at {node}: {error}"),
         Outcome::Timeout { node } => eprintln!("Timeout at {node}"),
     }
@@ -130,7 +130,7 @@ Workflow::builder(&registry)
     .build()?
 ```
 
-**Fan-in** payloads are JSON arrays in edge declaration order — downstream agents can index by position.
+**Fan-in** payloads are JSON objects keyed by upstream node ID — downstream agents access each branch's result by name.
 
 ### Supervisor
 
@@ -234,7 +234,7 @@ let outcome = Orchestrator::new(store)
     .await; // Outcome::Success(final) or Outcome::Failed — never panics
 ```
 
-The planner returns a `DagSpec` — a `nodes` array where each node has an `id`, a `capability` (or pinned `agent`), `depends_on` edges, and an optional `instruction`:
+The planner returns a `DagSpec` — a `nodes` array where each node has an `id`, a `capability` (or pinned `agent`), `depends_on` edges, an optional `instruction`, and an optional `metadata` map:
 
 ```json
 {
@@ -245,7 +245,7 @@ The planner returns a `DagSpec` — a `nodes` array where each node has an `id`,
 }
 ```
 
-A valid DAG has exactly one entry node (seeded with the goal) and one terminal node (whose output is the final result). See [DEVELOPMENT.md](DEVELOPMENT.md#dag-json-schema) for the full schema and validation rules.
+Any number of nodes with empty `depends_on` are entry nodes (all seeded with the goal). Any number of nodes not referenced by any `depends_on` are terminal nodes; `Outcome::Success` carries a `{ node_id: result }` map over all of them. See [DEVELOPMENT.md](DEVELOPMENT.md#dag-json-schema) for the full schema and validation rules.
 
 ## MCP Server
 
