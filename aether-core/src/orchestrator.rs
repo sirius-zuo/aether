@@ -32,7 +32,7 @@ fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>
         }),
         spawn: SpawnPolicy::PerRequest,
         failure: FailurePolicy::default(),
-        timeout: Duration::from_secs(60),
+        timeout: Duration::from_secs(300),
         shutdown_grace: Duration::from_secs(5),
         metadata,
     }

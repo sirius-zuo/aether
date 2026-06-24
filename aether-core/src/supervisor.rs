@@ -111,6 +111,10 @@ impl Supervisor {
                 node,
                 error: message,
             },
+            Err(AetherError::TransportError { node, message }) => Outcome::Failed {
+                node,
+                error: message,
+            },
             Err(e) => Outcome::Failed {
                 node: String::new(),
                 error: e.to_string(),

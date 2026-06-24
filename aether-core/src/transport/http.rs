@@ -21,7 +21,7 @@ impl HttpTransport {
             node_name: node_name.into(),
             http_url: http_url.into(),
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .timeout(Duration::from_secs(300))
                 .build()
                 .expect("failed to build reqwest client"),
         }
