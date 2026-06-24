@@ -100,7 +100,14 @@ async fn build_registry_and_workflow(
         ));
     }
 
-    let mut builder = Workflow::builder(&registry).entry(dag.entry_id());
+    let entry_ids = dag.entry_ids();
+    let first_entry = entry_ids
+        .first()
+        .copied()
+        .ok_or_else(|| AetherError::WorkflowError {
+            message: "DAG has no entry nodes".to_string(),
+        })?;
+    let mut builder = Workflow::builder(&registry).entry(first_entry);
     for node in &dag.nodes {
         for dep in &node.depends_on {
             builder = builder.edge(dep, &node.id);
