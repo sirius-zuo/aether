@@ -20,7 +20,7 @@ fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::
 pub enum SupervisorEvent {
     WorkflowStarted {
         workflow_id: Uuid,
-        entry: String,
+        entries: Vec<String>,
     },
     WorkflowFinished {
         workflow_id: Uuid,
@@ -97,7 +97,7 @@ impl Supervisor {
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowStarted {
             workflow_id,
-            entry: workflow.entry.clone(),
+            entries: workflow.entries.clone(),
         });
 
         let result = self
@@ -163,8 +163,11 @@ impl Supervisor {
         }
 
         // Nodes ready to execute this BFS round: (node_name, input_payload)
-        let mut ready: Vec<(String, serde_json::Value)> =
-            vec![(workflow.entry.clone(), initial_payload)];
+        let mut ready: Vec<(String, serde_json::Value)> = workflow
+            .entries
+            .iter()
+            .map(|e| (e.clone(), initial_payload.clone()))
+            .collect();
 
         let mut last_output = serde_json::Value::Null;
 
@@ -398,7 +401,7 @@ mod tests {
     async fn single_node_workflow_returns_payload() {
         let r = reg(&["only"]);
         let wf = Workflow {
-            entry: "only".to_string(),
+            entries: vec!["only".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
@@ -439,7 +442,7 @@ mod tests {
     async fn supervisor_event_stream_receives_workflow_started() {
         let r = reg(&["x"]);
         let wf = Workflow {
-            entry: "x".to_string(),
+            entries: vec!["x".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
@@ -486,7 +489,7 @@ mod tests {
             metadata,
         });
         let wf = Workflow {
-            entry: "worker".to_string(),
+            entries: vec!["worker".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
@@ -540,7 +543,7 @@ mod tests {
         r.register(mk_node("good"));
 
         let wf = Workflow {
-            entry: "bad".to_string(),
+            entries: vec!["bad".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);

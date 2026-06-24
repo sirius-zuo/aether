@@ -62,7 +62,7 @@ async fn single_echo_node() {
     let r = AgentRegistry::new();
     r.register(echo_node("echo", &url));
     let wf = Workflow {
-        entry: "echo".to_string(),
+        entries: vec!["echo".to_string()],
         edges: vec![],
     };
     let sup = Supervisor::new(r);
@@ -143,7 +143,7 @@ async fn supervisor_events_are_emitted() {
     let r = AgentRegistry::new();
     r.register(echo_node("node", &url));
     let wf = Workflow {
-        entry: "node".to_string(),
+        entries: vec!["node".to_string()],
         edges: vec![],
     };
     let sup = Supervisor::new(r);

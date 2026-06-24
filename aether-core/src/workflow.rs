@@ -13,7 +13,7 @@ pub struct Edge {
 }
 
 pub struct Workflow {
-    pub entry: String,
+    pub entries: Vec<String>,
     /// All edges in declaration order.
     pub edges: Vec<Edge>,
 }
@@ -22,7 +22,7 @@ impl Workflow {
     pub fn builder(registry: &AgentRegistry) -> WorkflowBuilder {
         WorkflowBuilder {
             registry: registry.clone(),
-            entry: None,
+            entries: Vec::new(),
             edges: Vec::new(),
         }
     }
@@ -39,8 +39,7 @@ impl Workflow {
 
     /// All node names referenced in the workflow.
     pub fn all_nodes(&self) -> HashSet<String> {
-        let mut nodes = HashSet::new();
-        nodes.insert(self.entry.clone());
+        let mut nodes: HashSet<String> = self.entries.iter().cloned().collect();
         for e in &self.edges {
             nodes.insert(e.from.clone());
             nodes.insert(e.to.clone());
@@ -51,23 +50,21 @@ impl Workflow {
 
 pub struct WorkflowBuilder {
     registry: AgentRegistry,
-    entry: Option<String>,
+    entries: Vec<String>,
     edges: Vec<Edge>,
 }
 
 impl WorkflowBuilder {
-    /// Set the entry node explicitly. Lets you build single-node workflows and
-    /// workflows whose entry is not the first edge's source. Takes precedence —
-    /// `edge` only auto-sets the entry when none has been set.
+    /// Register an entry node. Callable multiple times for parallel-start DAGs.
     pub fn entry(mut self, node: &str) -> Self {
-        self.entry = Some(node.to_string());
+        self.entries.push(node.to_string());
         self
     }
 
     /// Add an unconditional edge. The first `from` node becomes the entry.
     pub fn edge(mut self, from: &str, to: &str) -> Self {
-        if self.entry.is_none() {
-            self.entry = Some(from.to_string());
+        if self.entries.is_empty() {
+            self.entries.push(from.to_string());
         }
         self.edges.push(Edge {
             from: from.to_string(),
@@ -82,8 +79,8 @@ impl WorkflowBuilder {
     where
         F: Fn(&Envelope) -> bool + Send + Sync + 'static,
     {
-        if self.entry.is_none() {
-            self.entry = Some(from.to_string());
+        if self.entries.is_empty() {
+            self.entries.push(from.to_string());
         }
         self.edges.push(Edge {
             from: from.to_string(),
@@ -116,13 +113,14 @@ impl WorkflowBuilder {
 
     /// Validate all node names against the registry, detect cycles, and build.
     pub fn build(self) -> Result<Workflow, AetherError> {
-        let entry = self.entry.ok_or_else(|| AetherError::WorkflowError {
-            message: "workflow has no edges".to_string(),
-        })?;
+        if self.entries.is_empty() {
+            return Err(AetherError::WorkflowError {
+                message: "workflow has no entry node".to_string(),
+            });
+        }
 
         // Collect all referenced node names
-        let mut all_names: HashSet<String> = HashSet::new();
-        all_names.insert(entry.clone());
+        let mut all_names: HashSet<String> = self.entries.iter().cloned().collect();
         for e in &self.edges {
             all_names.insert(e.from.clone());
             all_names.insert(e.to.clone());
@@ -138,16 +136,16 @@ impl WorkflowBuilder {
         }
 
         // Cycle detection via DFS
-        detect_cycle(&entry, &self.edges)?;
+        detect_cycle(&self.entries, &self.edges)?;
 
         Ok(Workflow {
-            entry,
+            entries: self.entries,
             edges: self.edges,
         })
     }
 }
 
-fn detect_cycle(entry: &str, edges: &[Edge]) -> Result<(), AetherError> {
+fn detect_cycle(entries: &[String], edges: &[Edge]) -> Result<(), AetherError> {
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in edges {
         adj.entry(&e.from).or_default().push(&e.to);
@@ -156,10 +154,14 @@ fn detect_cycle(entry: &str, edges: &[Edge]) -> Result<(), AetherError> {
     let mut visited: HashSet<String> = HashSet::new();
     let mut rec_stack: HashSet<String> = HashSet::new();
 
-    if dfs(entry, &adj, &mut visited, &mut rec_stack) {
-        return Err(AetherError::WorkflowError {
-            message: "workflow graph contains a cycle".to_string(),
-        });
+    for entry in entries {
+        if !visited.contains(entry.as_str())
+            && dfs(entry, &adj, &mut visited, &mut rec_stack)
+        {
+            return Err(AetherError::WorkflowError {
+                message: "workflow graph contains a cycle".to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -231,7 +233,7 @@ mod tests {
     fn explicit_entry_single_node_builds() {
         let r = reg(&["solo"]);
         let wf = Workflow::builder(&r).entry("solo").build().unwrap();
-        assert_eq!(wf.entry, "solo");
+        assert_eq!(wf.entries, vec!["solo"]);
         assert_eq!(wf.edges.len(), 0);
     }
 
@@ -244,7 +246,7 @@ mod tests {
             .edge("root", "b")
             .build()
             .unwrap();
-        assert_eq!(wf.entry, "root");
+        assert_eq!(wf.entries, vec!["root"]);
         assert_eq!(wf.edges.len(), 2);
     }
 
@@ -256,7 +258,7 @@ mod tests {
             .edge("b", "c")
             .build()
             .unwrap();
-        assert_eq!(wf.entry, "a");
+        assert_eq!(wf.entries, vec!["a"]);
         assert_eq!(wf.edges.len(), 2);
     }
 
@@ -299,5 +301,33 @@ mod tests {
         let out = wf.outgoing("router");
         assert_eq!(out[0].to, "a");
         assert_eq!(out[1].to, "b");
+    }
+
+    #[test]
+    fn multi_entry_workflow_builds() {
+        let r = reg(&["a", "b", "c"]);
+        let wf = Workflow::builder(&r)
+            .entry("a")
+            .entry("b")
+            .edge("a", "c")
+            .edge("b", "c")
+            .build()
+            .unwrap();
+        let mut entries = wf.entries.clone();
+        entries.sort();
+        assert_eq!(entries, vec!["a", "b"]);
+        assert_eq!(wf.edges.len(), 2);
+    }
+
+    #[test]
+    fn multi_entry_cycle_rejected() {
+        let r = reg(&["a", "b"]);
+        let result = Workflow::builder(&r)
+            .entry("a")
+            .entry("b")
+            .edge("a", "b")
+            .edge("b", "a")
+            .build();
+        assert!(matches!(result, Err(AetherError::WorkflowError { .. })));
     }
 }
