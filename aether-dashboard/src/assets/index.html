@@ -114,7 +114,7 @@
     workflows.forEach(w => {
       const tr = makeRow([
         w.workflow_id.slice(0, 8) + '…',
-        w.entry,
+        (w.entries || []).join(', '),
         w.status,
       ]);
       tr.cells[2].className = 'status-' + w.status;
@@ -126,7 +126,7 @@
         const sel = document.getElementById('wf-select');
         const opt = document.createElement('option');
         opt.value = w.workflow_id;
-        opt.textContent = w.workflow_id.slice(0, 8) + ' (' + w.entry + ')';
+        opt.textContent = w.workflow_id.slice(0, 8) + ' (' + (w.entries || []).join(', ') + ')';
         sel.appendChild(opt);
       }
     });
@@ -183,7 +183,7 @@
         const event = JSON.parse(msg.data);
         if (event.WorkflowStarted) {
           const d = event.WorkflowStarted;
-          workflowState[d.workflow_id] = { workflow_id: d.workflow_id, entry: d.entry, status: 'running' };
+          workflowState[d.workflow_id] = { workflow_id: d.workflow_id, entries: d.entries, status: 'running' };
           refreshWorkflows(Object.values(workflowState));
           refreshAgents();
         }

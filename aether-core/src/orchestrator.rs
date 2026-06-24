@@ -100,7 +100,10 @@ async fn build_registry_and_workflow(
         ));
     }
 
-    let mut builder = Workflow::builder(&registry).entry(dag.entry_id());
+    let mut builder = Workflow::builder(&registry);
+    for id in dag.entry_ids() {
+        builder = builder.entry(id);
+    }
     for node in &dag.nodes {
         for dep in &node.depends_on {
             builder = builder.edge(dep, &node.id);
@@ -337,7 +340,7 @@ mod tests {
         let (registry, workflow) = build_registry_and_workflow(&store, &dag).await.unwrap();
         assert!(registry.get("n1").is_some());
         assert!(registry.get("n2").is_some());
-        assert_eq!(workflow.entry, "n1");
+        assert!(workflow.entries.contains(&"n1".to_string()));
         assert_eq!(workflow.incoming("n2").len(), 1);
         assert_eq!(workflow.outgoing("n1")[0].to, "n2");
     }

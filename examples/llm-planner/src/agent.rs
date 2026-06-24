@@ -63,7 +63,11 @@ pub fn extract_text(payload: &Value) -> String {
             } else if let Some(Value::String(s)) = map.get("goal") {
                 s.clone()
             } else {
-                payload.to_string()
+                // Named inputs map (fan-in) — join extracted text from each upstream value
+                map.values()
+                    .map(extract_text)
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n")
             }
         }
         Value::Array(items) => items
@@ -93,6 +97,7 @@ pub struct AgentState {
     pub system_prompt: String,
     pub mode: AgentMode,
     pub runner: Arc<LlmRunner>,
+    pub response_format: Option<serde_json::Value>,
 }
 
 async fn health() -> StatusCode {
@@ -123,7 +128,11 @@ async fn aether_invoke(
         },
     ];
 
-    match state.runner.invoke(messages).await {
+    let llm_result = match &state.response_format {
+        Some(schema) => state.runner.invoke_structured(messages, schema.clone()).await,
+        None => state.runner.invoke(messages).await,
+    };
+    match llm_result {
         Ok(resp) => {
             if state.mode == AgentMode::Planner {
                 tracing::info!(agent = %state.name, dag = %resp.content, "planner produced DAG");
@@ -185,6 +194,18 @@ mod tests {
     fn extract_text_joins_array() {
         let v = json!([{ "message": "a" }, { "message": "b" }]);
         assert_eq!(extract_text(&v), "a\n\n---\n\nb");
+    }
+
+    #[test]
+    fn extract_text_joins_named_map_values() {
+        let v = json!({
+            "pros": { "message": "pro analysis" },
+            "cons": { "message": "con analysis" }
+        });
+        let result = extract_text(&v);
+        assert!(result.contains("pro analysis"));
+        assert!(result.contains("con analysis"));
+        assert!(result.contains("---"));
     }
 
     #[test]

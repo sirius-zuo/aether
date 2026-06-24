@@ -55,25 +55,28 @@ async fn main() {
         .expect("LlmRunner config"),
     );
 
-    // (name, port, capability, mode, system_prompt)
-    let agents: [(&str, u16, &str, AgentMode, String); 6] = [
-        ("planner", 9101, "plan", AgentMode::Planner, prompts::planner_prompt()),
-        ("context", 9102, "gather_context", AgentMode::Worker, prompts::CONTEXT_PROMPT.to_string()),
-        ("pros", 9103, "analyze_pros", AgentMode::Worker, prompts::PROS_PROMPT.to_string()),
-        ("cons", 9104, "analyze_cons", AgentMode::Worker, prompts::CONS_PROMPT.to_string()),
-        ("cost", 9105, "assess_cost", AgentMode::Worker, prompts::COST_PROMPT.to_string()),
-        ("synth", 9106, "synthesize", AgentMode::Worker, prompts::SYNTH_PROMPT.to_string()),
+    let dag_schema = aether_core::DagSpec::json_schema();
+
+    // (name, port, capability, mode, system_prompt, response_format)
+    let agents: Vec<(&str, u16, &str, AgentMode, String, Option<serde_json::Value>)> = vec![
+        ("planner",  9101, "plan",           AgentMode::Planner, prompts::planner_prompt(),              Some(dag_schema)),
+        ("context",  9102, "gather_context", AgentMode::Worker,  prompts::CONTEXT_PROMPT.to_string(),    None),
+        ("pros",     9103, "analyze_pros",   AgentMode::Worker,  prompts::PROS_PROMPT.to_string(),       None),
+        ("cons",     9104, "analyze_cons",   AgentMode::Worker,  prompts::CONS_PROMPT.to_string(),       None),
+        ("cost",     9105, "assess_cost",    AgentMode::Worker,  prompts::COST_PROMPT.to_string(),       None),
+        ("synth",    9106, "synthesize",     AgentMode::Worker,  prompts::SYNTH_PROMPT.to_string(),      None),
     ];
 
     let store = RegistryStore::open_in_memory().expect("registry store");
 
-    for (name, port, capability, mode, system_prompt) in agents {
+    for (name, port, capability, mode, system_prompt, response_format) in agents {
         spawn_agent(Arc::new(AgentState {
             name: name.to_string(),
             port,
             system_prompt,
             mode,
             runner: Arc::clone(&runner),
+            response_format,
         }))
         .await
         .unwrap_or_else(|e| panic!("failed to bind {name} on port {port}: {e}"));
@@ -107,9 +110,11 @@ async fn main() {
 
     match Orchestrator::new(store).submit(goal).await {
         Outcome::Success(result) => {
+            // result is now { "synth": { "message": "…" } } — pick the first terminal's message
             let text = result
-                .get("message")
-                .and_then(|v| v.as_str())
+                .as_object()
+                .and_then(|map| map.values().next())
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()))
                 .map(str::to_string)
                 .unwrap_or_else(|| result.to_string());
             println!("=== Synthesis ===\n\n{text}\n");

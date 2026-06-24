@@ -20,7 +20,7 @@ fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::
 pub enum SupervisorEvent {
     WorkflowStarted {
         workflow_id: Uuid,
-        entry: String,
+        entries: Vec<String>,
     },
     WorkflowFinished {
         workflow_id: Uuid,
@@ -97,7 +97,7 @@ impl Supervisor {
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowStarted {
             workflow_id,
-            entry: workflow.entry.clone(),
+            entries: workflow.entries.clone(),
         });
 
         let result = self
@@ -163,10 +163,11 @@ impl Supervisor {
         }
 
         // Nodes ready to execute this BFS round: (node_name, input_payload)
-        let mut ready: Vec<(String, serde_json::Value)> =
-            vec![(workflow.entry.clone(), initial_payload)];
-
-        let mut last_output = serde_json::Value::Null;
+        let mut ready: Vec<(String, serde_json::Value)> = workflow
+            .entries
+            .iter()
+            .map(|e| (e.clone(), initial_payload.clone()))
+            .collect();
 
         while !ready.is_empty() {
             let mut join_set: JoinSet<TaskResult> = JoinSet::new();
@@ -240,7 +241,6 @@ impl Supervisor {
                     Ok(Ok((node_name, response, fired_edges))) => {
                         let output = response.payload.clone();
                         node_outputs.insert(node_name.clone(), output.clone());
-                        last_output = output.clone();
 
                         for (from, to) in fired_edges {
                             if let Some(froms) = fan_in_slots.get(&to) {
@@ -251,9 +251,12 @@ impl Supervisor {
 
                                 // Fire fan-in node when all slots filled
                                 if slots.iter().all(|s| s.is_some()) {
-                                    let combined: Vec<serde_json::Value> =
-                                        slots.iter().map(|s| s.clone().unwrap()).collect();
-                                    ready.push((to.clone(), serde_json::Value::Array(combined)));
+                                    let combined: serde_json::Map<String, serde_json::Value> = froms
+                                        .iter()
+                                        .zip(slots.iter())
+                                        .map(|(from, slot)| (from.clone(), slot.clone().unwrap()))
+                                        .collect();
+                                    ready.push((to.clone(), serde_json::Value::Object(combined)));
                                 }
                             } else {
                                 ready.push((to.clone(), output.clone()));
@@ -270,7 +273,13 @@ impl Supervisor {
             }
         }
 
-        Ok(last_output)
+        let source_nodes: std::collections::HashSet<&str> =
+            workflow.edges.iter().map(|e| e.from.as_str()).collect();
+        let terminal_map: serde_json::Map<String, serde_json::Value> = node_outputs
+            .into_iter()
+            .filter(|(name, _)| !source_nodes.contains(name.as_str()))
+            .collect();
+        Ok(serde_json::Value::Object(terminal_map))
     }
 }
 
@@ -398,7 +407,7 @@ mod tests {
     async fn single_node_workflow_returns_payload() {
         let r = reg(&["only"]);
         let wf = Workflow {
-            entry: "only".to_string(),
+            entries: vec!["only".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
@@ -412,11 +421,16 @@ mod tests {
         let wf = Workflow::builder(&r).edge("a", "b").build().unwrap();
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!(42)).await;
-        assert!(matches!(outcome, Outcome::Success(v) if v == 42));
+        // "b" is the single terminal → result is { "b": 42 }
+        if let Outcome::Success(v) = outcome {
+            assert_eq!(v["b"], 42);
+        } else {
+            panic!("expected Success, got {:?}", outcome);
+        }
     }
 
     #[tokio::test]
-    async fn fan_out_fan_in_produces_array() {
+    async fn fan_out_fan_in_produces_named_map() {
         let r = reg(&["intake", "left", "right", "merge"]);
         let wf = Workflow::builder(&r)
             .edge("intake", "left")
@@ -428,8 +442,10 @@ mod tests {
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!("start")).await;
         if let Outcome::Success(v) = outcome {
-            assert!(v.is_array(), "expected JSON array at fan-in, got: {v}");
-            assert_eq!(v.as_array().unwrap().len(), 2);
+            // "merge" is the single terminal, receives named map from left+right
+            assert!(v["merge"].is_object(), "fan-in result should be a named map");
+            assert_eq!(v["merge"]["left"], "start");
+            assert_eq!(v["merge"]["right"], "start");
         } else {
             panic!("expected Success, got {:?}", outcome);
         }
@@ -439,7 +455,7 @@ mod tests {
     async fn supervisor_event_stream_receives_workflow_started() {
         let r = reg(&["x"]);
         let wf = Workflow {
-            entry: "x".to_string(),
+            entries: vec!["x".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
@@ -486,17 +502,72 @@ mod tests {
             metadata,
         });
         let wf = Workflow {
-            entry: "worker".to_string(),
+            entries: vec!["worker".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);
         let outcome = sup.run(&wf, serde_json::json!(null)).await;
         match outcome {
             Outcome::Success(v) => {
-                assert_eq!(v["instruction"], "do-the-thing");
-                assert!(v.get("node").is_some(), "reserved keys still present");
+                // "worker" is the single terminal → v = { "worker": { "instruction": …, "node": … } }
+                assert_eq!(v["worker"]["instruction"], "do-the-thing");
+                assert!(v["worker"].get("node").is_some(), "reserved keys still present");
             }
             other => panic!("expected Success, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fan_in_delivers_named_map() {
+        let r = reg(&["intake", "left", "right", "merge"]);
+        let wf = Workflow::builder(&r)
+            .edge("intake", "left")
+            .edge("intake", "right")
+            .edge("left", "merge")
+            .edge("right", "merge")
+            .build()
+            .unwrap();
+        let sup = Supervisor::new(r);
+        let outcome = sup.run(&wf, serde_json::json!("start")).await;
+        if let Outcome::Success(v) = outcome {
+            // "merge" is the single terminal → v = { "merge": { "left": "start", "right": "start" } }
+            let merge_result = &v["merge"];
+            assert!(merge_result.is_object(), "fan-in must deliver a named map, got: {merge_result}");
+            assert!(merge_result.get("left").is_some(), "missing 'left' key");
+            assert!(merge_result.get("right").is_some(), "missing 'right' key");
+        } else {
+            panic!("expected Success, got {:?}", outcome);
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_terminal_returns_map_of_results() {
+        let r = reg(&["root", "a", "b"]);
+        let wf = Workflow::builder(&r)
+            .edge("root", "a")
+            .edge("root", "b")
+            .build()
+            .unwrap();
+        let sup = Supervisor::new(r);
+        let outcome = sup.run(&wf, serde_json::json!("payload")).await;
+        if let Outcome::Success(v) = outcome {
+            assert!(v.get("a").is_some(), "terminal 'a' missing from result map");
+            assert!(v.get("b").is_some(), "terminal 'b' missing from result map");
+        } else {
+            panic!("expected Success, got {:?}", outcome);
+        }
+    }
+
+    #[tokio::test]
+    async fn single_terminal_result_wrapped_in_map() {
+        let r = reg(&["a", "b"]);
+        let wf = Workflow::builder(&r).edge("a", "b").build().unwrap();
+        let sup = Supervisor::new(r);
+        let outcome = sup.run(&wf, serde_json::json!(42)).await;
+        if let Outcome::Success(v) = outcome {
+            assert_eq!(v["b"], 42, "single terminal should appear under key 'b'");
+        } else {
+            panic!("expected Success, got {:?}", outcome);
         }
     }
 
@@ -540,7 +611,7 @@ mod tests {
         r.register(mk_node("good"));
 
         let wf = Workflow {
-            entry: "bad".to_string(),
+            entries: vec!["bad".to_string()],
             edges: vec![],
         };
         let sup = Supervisor::new(r);

@@ -4,10 +4,12 @@
 //! that emits valid DAG JSON can serve as a planner.
 
 use crate::AetherError;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// A single node in a planned DAG.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct DagNode {
     /// Unique within the DAG; referenced by `depends_on`.
     pub id: String,
@@ -23,10 +25,13 @@ pub struct DagNode {
     /// Planner's per-node directive, carried to the worker in Envelope metadata.
     #[serde(default)]
     pub instruction: Option<String>,
+    /// Flat key-value bag for arbitrary per-node configuration.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 /// A complete planned DAG.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct DagSpec {
     pub nodes: Vec<DagNode>,
 }
@@ -40,9 +45,7 @@ impl DagSpec {
     }
 
     /// Structural validation: non-empty, unique ids, resolvable deps, each node has
-    /// a capability or an agent pin, exactly one entry node (empty `depends_on`), and
-    /// exactly one terminal node (depended on by nothing). The single terminal makes
-    /// the workflow's final result well-defined. Cycle detection is left to
+    /// a capability or an agent pin. Cycle detection is left to
     /// `WorkflowBuilder::build`.
     pub fn validate(&self) -> Result<(), AetherError> {
         let err = |m: String| AetherError::WorkflowError { message: m };
@@ -71,41 +74,36 @@ impl DagSpec {
                 }
             }
         }
-        let entries = self
-            .nodes
+        Ok(())
+    }
+
+    /// All entry node ids (nodes with no dependencies). Call after `validate()`.
+    pub fn entry_ids(&self) -> Vec<&str> {
+        self.nodes
             .iter()
             .filter(|n| n.depends_on.is_empty())
-            .count();
-        if entries != 1 {
-            return Err(err(format!(
-                "DAG must have exactly one entry node (found {entries})"
-            )));
-        }
-        let referenced: std::collections::HashSet<&str> = self
+            .map(|n| n.id.as_str())
+            .collect()
+    }
+
+    /// All terminal node ids (not depended on by any other node). Call after `validate()`.
+    pub fn terminal_ids(&self) -> Vec<&str> {
+        let depended_on: std::collections::HashSet<&str> = self
             .nodes
             .iter()
             .flat_map(|n| n.depends_on.iter().map(String::as_str))
             .collect();
-        let terminals = self
-            .nodes
-            .iter()
-            .filter(|n| !referenced.contains(n.id.as_str()))
-            .count();
-        if terminals != 1 {
-            return Err(err(format!(
-                "DAG must have exactly one terminal node (found {terminals})"
-            )));
-        }
-        Ok(())
-    }
-
-    /// The single entry node's id. Only valid after `validate` returns `Ok`.
-    pub fn entry_id(&self) -> &str {
         self.nodes
             .iter()
-            .find(|n| n.depends_on.is_empty())
+            .filter(|n| !depended_on.contains(n.id.as_str()))
             .map(|n| n.id.as_str())
-            .expect("entry_id called on DAG without an entry node; call validate first")
+            .collect()
+    }
+
+    /// JSON Schema for `DagSpec`, suitable for use as a structured-output schema.
+    pub fn json_schema() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(DagSpec))
+            .expect("DagSpec schema is always serializable")
     }
 }
 
@@ -150,7 +148,7 @@ mod tests {
             { "id": "b", "capability": "y", "depends_on": ["a"] }
         ]));
         assert!(d.validate().is_ok());
-        assert_eq!(d.entry_id(), "a");
+        assert_eq!(d.entry_ids(), vec!["a"]);
     }
 
     #[test]
@@ -197,32 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_multiple_entries() {
-        let d = dag(serde_json::json!([
-            { "id": "a", "capability": "x", "depends_on": [] },
-            { "id": "b", "capability": "y", "depends_on": [] }
-        ]));
-        assert!(matches!(
-            d.validate(),
-            Err(AetherError::WorkflowError { .. })
-        ));
-    }
-
-    #[test]
-    fn validate_rejects_multiple_terminals() {
-        // One entry (a) fanning out to two leaves (b, c) — ambiguous final result.
-        let d = dag(serde_json::json!([
-            { "id": "a", "capability": "x", "depends_on": [] },
-            { "id": "b", "capability": "y", "depends_on": ["a"] },
-            { "id": "c", "capability": "z", "depends_on": ["a"] }
-        ]));
-        assert!(matches!(
-            d.validate(),
-            Err(AetherError::WorkflowError { .. })
-        ));
-    }
-
-    #[test]
     fn validate_accepts_fan_in_to_single_terminal() {
         // Diamond: a -> {b, c} -> d. Single entry, single terminal.
         let d = dag(serde_json::json!([
@@ -232,5 +204,73 @@ mod tests {
             { "id": "d", "capability": "w", "depends_on": ["b", "c"] }
         ]));
         assert!(d.validate().is_ok());
+        assert_eq!(d.terminal_ids(), vec!["d"]);
+    }
+
+    #[test]
+    fn validate_accepts_multiple_entries() {
+        let d = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] },
+            { "id": "b", "capability": "y", "depends_on": [] },
+            { "id": "c", "capability": "z", "depends_on": ["a", "b"] }
+        ]));
+        assert!(d.validate().is_ok());
+        let mut ids = d.entry_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn validate_accepts_multiple_terminals() {
+        let d = dag(serde_json::json!([
+            { "id": "root", "capability": "x", "depends_on": [] },
+            { "id": "a", "capability": "y", "depends_on": ["root"] },
+            { "id": "b", "capability": "z", "depends_on": ["root"] }
+        ]));
+        assert!(d.validate().is_ok());
+        let mut ids = d.terminal_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn metadata_field_round_trips() {
+        let json = serde_json::json!({
+            "nodes": [{
+                "id": "n1",
+                "capability": "fetch",
+                "depends_on": [],
+                "metadata": { "url": "https://example.com", "timeout_ms": "5000" }
+            }]
+        });
+        let dag = DagSpec::parse(&json).unwrap();
+        assert_eq!(dag.nodes[0].metadata.get("url").unwrap(), "https://example.com");
+        assert_eq!(dag.nodes[0].metadata.get("timeout_ms").unwrap(), "5000");
+    }
+
+    #[test]
+    fn metadata_defaults_to_empty() {
+        let d = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] }
+        ]));
+        assert!(d.nodes[0].metadata.is_empty());
+    }
+
+    #[test]
+    fn json_schema_contains_nodes_and_depends_on() {
+        let schema = DagSpec::json_schema();
+        assert!(schema.is_object());
+        let s = schema.to_string();
+        assert!(s.contains("nodes"), "schema must mention 'nodes'");
+        assert!(s.contains("depends_on"), "schema must mention 'depends_on'");
+    }
+
+    #[test]
+    fn terminal_ids_returns_leaf_nodes() {
+        let d = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] },
+            { "id": "b", "capability": "y", "depends_on": ["a"] }
+        ]));
+        assert_eq!(d.terminal_ids(), vec!["b"]);
     }
 }

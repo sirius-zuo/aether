@@ -29,7 +29,7 @@ impl TokenAccumulator {
 #[derive(Clone, serde::Serialize)]
 pub struct WorkflowInfo {
     pub workflow_id: String,
-    pub entry: String,
+    pub entries: Vec<String>,
     pub status: String,
 }
 
