@@ -13,6 +13,7 @@ dependencies = [
  "httpmock",
  "reqwest",
  "rusqlite",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
