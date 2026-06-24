@@ -1,4 +1,45 @@
 use serde_json::Value;
+use aether_core::{Envelope, EnvelopeKind};
+use std::collections::HashMap;
+use uuid::Uuid;
+
+/// Output behaviour for an agent's LLM response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AgentMode {
+    /// Wrap the LLM text as `{"message": <text>}`.
+    Worker,
+    /// Parse the LLM text as a DAG JSON object (or return an `error` Envelope).
+    Planner,
+}
+
+/// Shape an agent's LLM output into a response Envelope that echoes the request id.
+pub fn build_result(req_id: Uuid, mode: AgentMode, llm_text: &str) -> Envelope {
+    match mode {
+        AgentMode::Worker => Envelope {
+            id: req_id,
+            kind: EnvelopeKind::Result,
+            payload: serde_json::json!({ "message": llm_text }),
+            metadata: HashMap::new(),
+        },
+        AgentMode::Planner => match extract_json(llm_text) {
+            Some(dag) => Envelope {
+                id: req_id,
+                kind: EnvelopeKind::Result,
+                payload: dag,
+                metadata: HashMap::new(),
+            },
+            None => Envelope {
+                id: req_id,
+                kind: EnvelopeKind::Error,
+                payload: serde_json::json!({
+                    "error": "planner did not return valid JSON",
+                    "raw": llm_text,
+                }),
+                metadata: HashMap::new(),
+            },
+        },
+    }
+}
 
 /// Extract a user-facing text string from an incoming Envelope payload.
 ///
@@ -79,5 +120,41 @@ mod tests {
     #[test]
     fn extract_json_returns_none_when_no_object() {
         assert!(extract_json("no json here").is_none());
+    }
+
+    use aether_core::EnvelopeKind;
+    use uuid::Uuid;
+
+    #[test]
+    fn build_result_worker_wraps_message() {
+        let id = Uuid::new_v4();
+        let env = build_result(id, AgentMode::Worker, "the answer");
+        assert_eq!(env.id, id);
+        assert_eq!(env.kind, EnvelopeKind::Result);
+        assert_eq!(env.payload, json!({ "message": "the answer" }));
+    }
+
+    #[test]
+    fn build_result_planner_parses_json() {
+        let env = build_result(Uuid::new_v4(), AgentMode::Planner, r#"{"nodes":[]}"#);
+        assert_eq!(env.kind, EnvelopeKind::Result);
+        assert_eq!(env.payload, json!({ "nodes": [] }));
+    }
+
+    #[test]
+    fn build_result_planner_tolerates_fences() {
+        let env = build_result(
+            Uuid::new_v4(),
+            AgentMode::Planner,
+            "```json\n{\"nodes\":[]}\n```",
+        );
+        assert_eq!(env.kind, EnvelopeKind::Result);
+        assert_eq!(env.payload, json!({ "nodes": [] }));
+    }
+
+    #[test]
+    fn build_result_planner_invalid_json_is_error() {
+        let env = build_result(Uuid::new_v4(), AgentMode::Planner, "I cannot do that");
+        assert_eq!(env.kind, EnvelopeKind::Error);
     }
 }
