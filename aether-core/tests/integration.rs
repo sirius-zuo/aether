@@ -68,7 +68,8 @@ async fn single_echo_node() {
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!({"test": true})).await;
     match outcome {
-        Outcome::Success(v) => assert_eq!(v["test"], true),
+        // "echo" is the single terminal → v = { "echo": { "test": true } }
+        Outcome::Success(v) => assert_eq!(v["echo"]["test"], true),
         other => panic!("expected Success, got {:?}", other),
     }
 }
@@ -87,7 +88,8 @@ async fn chain_of_two_echo_nodes() {
     let sup = Supervisor::new(r);
     let outcome = sup.run(&wf, serde_json::json!(42)).await;
     match outcome {
-        Outcome::Success(v) => assert_eq!(v, 42),
+        // "second" is the single terminal → v = { "second": 42 }
+        Outcome::Success(v) => assert_eq!(v["second"], 42),
         other => panic!("expected Success, got {:?}", other),
     }
 }
@@ -111,8 +113,10 @@ async fn fan_out_fan_in_with_http_servers() {
     let outcome = sup.run(&wf, serde_json::json!("start")).await;
     match outcome {
         Outcome::Success(v) => {
-            assert!(v.is_array(), "fan-in should produce array, got: {v}");
-            assert_eq!(v.as_array().unwrap().len(), 2);
+            // "merge" is the single terminal; it receives named map { "left": …, "right": … }
+            assert!(v["merge"].is_object(), "fan-in result should be a named map, got: {v}");
+            assert!(v["merge"].get("left").is_some());
+            assert!(v["merge"].get("right").is_some());
         }
         other => panic!("expected Success, got {:?}", other),
     }

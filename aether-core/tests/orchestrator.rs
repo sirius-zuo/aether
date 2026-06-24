@@ -104,7 +104,8 @@ async fn end_to_end_plan_and_execute() {
         .submit(serde_json::json!({"goal": "summarize X"}))
         .await;
     match outcome {
-        Outcome::Success(v) => assert_eq!(v["goal"], "summarize X"),
+        // "n2" is the single terminal → v = { "n2": { "goal": "summarize X" } }
+        Outcome::Success(v) => assert_eq!(v["n2"]["goal"], "summarize X"),
         other => panic!("expected Success, got {other:?}"),
     }
 }
