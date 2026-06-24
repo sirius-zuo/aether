@@ -2,6 +2,13 @@ use serde_json::Value;
 use aether_core::{Envelope, EnvelopeKind};
 use std::collections::HashMap;
 use uuid::Uuid;
+use std::sync::Arc;
+
+use agentverse::{LlmRunner, Message, MessageRole};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 
 /// Output behaviour for an agent's LLM response.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +84,81 @@ pub fn extract_json(text: &str) -> Option<Value> {
         return None;
     }
     serde_json::from_str(&text[start..=end]).ok()
+}
+
+/// Per-agent server state: its role prompt, output mode, and the shared LLM runner.
+pub struct AgentState {
+    pub name: String,
+    pub port: u16,
+    pub system_prompt: String,
+    pub mode: AgentMode,
+    pub runner: Arc<LlmRunner>,
+}
+
+async fn health() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn aether_invoke(
+    State(state): State<Arc<AgentState>>,
+    Json(req): Json<Envelope>,
+) -> Json<Envelope> {
+    let node = req.metadata.get("node").cloned().unwrap_or_default();
+    tracing::info!(agent = %state.name, node = %node, "invoke received");
+
+    let mut user = extract_text(&req.payload);
+    if let Some(instruction) = req.metadata.get("instruction") {
+        user.push_str("\n\nDirective: ");
+        user.push_str(instruction);
+    }
+
+    let messages = vec![
+        Message {
+            role: MessageRole::System,
+            content: state.system_prompt.clone(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: user,
+        },
+    ];
+
+    match state.runner.invoke(messages).await {
+        Ok(resp) => {
+            if state.mode == AgentMode::Planner {
+                tracing::info!(agent = %state.name, dag = %resp.content, "planner produced DAG");
+            }
+            Json(build_result(req.id, state.mode, &resp.content))
+        }
+        Err(e) => {
+            tracing::error!(agent = %state.name, "LLM call failed: {e}");
+            Json(Envelope {
+                id: req.id,
+                kind: EnvelopeKind::Error,
+                payload: serde_json::json!({ "error": e.to_string() }),
+                metadata: HashMap::new(),
+            })
+        }
+    }
+}
+
+/// Bind the agent's port and serve `/aether/invoke` + `/health` on a background
+/// task. The bind happens before returning, so on `Ok(())` the socket is listening.
+pub async fn spawn_agent(state: Arc<AgentState>) -> std::io::Result<()> {
+    let addr = format!("127.0.0.1:{}", state.port);
+    let name = state.name.clone();
+    let app = Router::new()
+        .route("/aether/invoke", post(aether_invoke))
+        .route("/health", get(health))
+        .with_state(Arc::clone(&state));
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(agent = %name, "server error: {e}");
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]
