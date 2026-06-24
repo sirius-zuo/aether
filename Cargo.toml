@@ -4,6 +4,7 @@ members = [
     "aether-dashboard",
     "aether-mcp",
     "examples/agentverse-pipeline",
+    "examples/llm-planner",
 ]
 resolver = "2"
 
