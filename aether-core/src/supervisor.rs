@@ -362,6 +362,103 @@ impl Supervisor {
         Ok(Outcome::Success(result))
     }
 
+    /// Deliver a decision to a parked node and continue the execution.
+    pub async fn resume_execution(
+        &self,
+        workflow_id: Uuid,
+        workflow: &Workflow,
+        node_id: &str,
+        decision: crate::ApprovalDecision,
+    ) -> Outcome {
+        let wid = workflow_id.to_string();
+
+        let node_rec = match self.store.load_execution(&wid).await {
+            Ok(Some((_e, nodes))) => nodes.into_iter().find(|n| n.node_id == node_id),
+            Ok(None) => None,
+            Err(e) => return Outcome::Failed { node: node_id.into(), error: e.to_string() },
+        };
+        let Some(node_rec) = node_rec else {
+            return Outcome::Failed { node: node_id.into(), error: "unknown node".into() };
+        };
+        if node_rec.status != crate::NodeStatus::Suspended {
+            return Outcome::Failed { node: node_id.into(), error: "node is not suspended".into() };
+        }
+        let (Some(session_id), Some(approval_id)) = (node_rec.session_id, node_rec.approval_id) else {
+            return Outcome::Failed { node: node_id.into(), error: "missing resume correlation".into() };
+        };
+        let Some(node) = self.registry.get(node_id) else {
+            return Outcome::Failed { node: node_id.into(), error: "node not in registry".into() };
+        };
+
+        let req = crate::ResumeRequest { session_id, approval_id, decision };
+        let response = match self.instance_manager.resume(&node, req).await {
+            Ok(env) => env,
+            Err(e) => {
+                let _ = self
+                    .store
+                    .finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string()))
+                    .await;
+                return Outcome::Failed { node: node_id.into(), error: e.to_string() };
+            }
+        };
+
+        // Re-park if the agent interrupted again.
+        if response.kind == EnvelopeKind::Suspended {
+            let sp: crate::SuspendPayload = match serde_json::from_value(response.payload.clone()) {
+                Ok(v) => v,
+                Err(e) => return Outcome::Failed { node: node_id.into(), error: e.to_string() },
+            };
+            let _ = self
+                .store
+                .park_node(&wid, node_id, &sp.session_id, &sp.approval_id, &sp.kind, &sp.prompt, None)
+                .await;
+            let _ = self
+                .store
+                .finish_execution(&wid, crate::ExecutionStatus::Suspended, None, None)
+                .await;
+            return Outcome::Suspended { workflow_id };
+        }
+        if response.kind == EnvelopeKind::Error {
+            let err = response.payload.to_string();
+            let _ = self
+                .store
+                .finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&err))
+                .await;
+            return Outcome::Failed { node: node_id.into(), error: err };
+        }
+
+        // Completed: checkpoint and expand downstream, then continue the loop.
+        if let Err(e) = self.store.complete_node(&wid, node_id, &response.payload.to_string()).await {
+            return Outcome::Failed { node: node_id.into(), error: e.to_string() };
+        }
+        // Reactivate the execution row so finalize can succeed it.
+        let _ = self
+            .store
+            .finish_execution(&wid, crate::ExecutionStatus::Running, None, None)
+            .await;
+
+        let mut ready: Vec<(String, serde_json::Value)> = Vec::new();
+        for edge in workflow.outgoing(node_id) {
+            if edge.when.as_ref().is_none_or(|pred| pred(&response)) {
+                match self.node_ready_input(workflow, &wid, &edge.to).await {
+                    Ok(Some(input)) => ready.push((edge.to.clone(), input)),
+                    Ok(None) => {}
+                    Err(e) => return Outcome::Failed { node: edge.to.clone(), error: e.to_string() },
+                }
+            }
+        }
+
+        let outcome = match self.drive(workflow, workflow_id, ready).await {
+            Ok(o) => o,
+            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+        };
+        let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
+            workflow_id,
+            result: outcome.clone(),
+        });
+        outcome
+    }
+
     async fn fail_execution(&self, wid: &str, e: &AetherError) -> Result<Outcome, AetherError> {
         let (node, error) = match e {
             AetherError::AgentTimeout { node } => {
@@ -783,5 +880,67 @@ mod tests {
         let after = nodes.iter().find(|n| n.node_id == "after").unwrap();
         assert_eq!(gate.status, crate::NodeStatus::Suspended);
         assert_eq!(after.status, crate::NodeStatus::Pending); // downstream NOT fired
+    }
+
+    #[tokio::test]
+    async fn resume_completes_parked_run() {
+        struct GateTransport;
+        #[async_trait]
+        impl Transport for GateTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                Ok(Envelope {
+                    kind: EnvelopeKind::Suspended,
+                    payload: serde_json::json!({
+                        "session_id": "s1", "approval_id": "a1",
+                        "kind": "phase_gate", "prompt": "ok?"
+                    }),
+                    ..msg
+                })
+            }
+            async fn resume(&self, _r: crate::resume::ResumeRequest) -> Result<Envelope, AetherError> {
+                Ok(Envelope {
+                    id: Uuid::new_v4(),
+                    kind: EnvelopeKind::Result,
+                    payload: serde_json::json!({"approved": true}),
+                    metadata: HashMap::new(),
+                })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct GateFactory;
+        #[async_trait]
+        impl AgentFactory for GateFactory {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(GateTransport))
+            }
+        }
+
+        let r = AgentRegistry::new();
+        r.register(AgentNode {
+            name: "gate".into(),
+            capabilities: vec![],
+            factory: Arc::new(GateFactory),
+            spawn: SpawnPolicy::PerRequest,
+            failure: FailurePolicy::default(),
+            timeout: Duration::from_secs(5),
+            shutdown_grace: Duration::from_secs(1),
+            metadata: HashMap::new(),
+        });
+        let wf = Workflow::builder(&r).entry("gate").build().unwrap();
+
+        let store = crate::ExecutionStore::open_in_memory().unwrap();
+        let sup = Supervisor::with_store(r, store.clone());
+        let wid = Uuid::new_v4();
+
+        let parked = sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
+        assert!(matches!(parked, Outcome::Suspended { .. }));
+
+        let done = sup
+            .resume_execution(wid, &wf, "gate", crate::ApprovalDecision::Approved)
+            .await;
+        match done {
+            Outcome::Success(v) => assert_eq!(v["gate"]["approved"], true),
+            other => panic!("expected Success, got {:?}", other),
+        }
     }
 }
