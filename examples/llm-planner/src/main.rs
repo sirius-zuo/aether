@@ -127,5 +127,8 @@ async fn main() {
             eprintln!("Run timed out at node '{node}'");
             std::process::exit(1);
         }
+        Outcome::Suspended { workflow_id } => {
+            println!("Run suspended (workflow {workflow_id}), awaiting resume.");
+        }
     }
 }

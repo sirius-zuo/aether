@@ -412,6 +412,14 @@ impl Supervisor {
                 .store
                 .park_node(&wid, node_id, &sp.session_id, &sp.approval_id, &sp.kind, &sp.prompt, None)
                 .await;
+            let _ = self.event_tx.send(SupervisorEvent::NodeSuspended {
+                workflow_id,
+                node: node_id.to_string(),
+                session_id: sp.session_id,
+                approval_id: sp.approval_id,
+                kind: sp.kind,
+                prompt: sp.prompt,
+            });
             let _ = self
                 .store
                 .finish_execution(&wid, crate::ExecutionStatus::Suspended, None, None)
