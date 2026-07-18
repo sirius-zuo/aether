@@ -233,13 +233,22 @@ impl Supervisor {
                 };
 
                 if response.kind == EnvelopeKind::Suspended {
-                    let sp: crate::SuspendPayload = serde_json::from_value(response.payload.clone())
-                        .map_err(|e| AetherError::WorkflowError {
-                            message: format!("malformed Suspended payload from '{node_name}': {e}"),
-                        })?;
-                    self.store
+                    let sp: crate::SuspendPayload = match serde_json::from_value(response.payload.clone()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let we = AetherError::WorkflowError {
+                                message: format!("malformed Suspended payload from '{node_name}': {e}"),
+                            };
+                            return self.fail_execution(&wid, &we).await;
+                        }
+                    };
+                    if let Err(e) = self
+                        .store
                         .park_node(&wid, &node_name, &sp.session_id, &sp.approval_id, &sp.kind, &sp.prompt, None)
-                        .await?;
+                        .await
+                    {
+                        return self.fail_execution(&wid, &e).await;
+                    }
                     let _ = self.event_tx.send(SupervisorEvent::NodeSuspended {
                         workflow_id,
                         node: node_name.clone(),
@@ -253,13 +262,19 @@ impl Supervisor {
                 }
 
                 // Normal completion: checkpoint output, then expand downstream.
-                self.store
+                if let Err(e) = self
+                    .store
                     .complete_node(&wid, &node_name, &response.payload.to_string())
-                    .await?;
+                    .await
+                {
+                    return self.fail_execution(&wid, &e).await;
+                }
 
                 for (_from, to) in fired_edges {
-                    if let Some(input) = self.node_ready_input(workflow, &wid, &to).await? {
-                        ready.push((to, input));
+                    match self.node_ready_input(workflow, &wid, &to).await {
+                        Ok(Some(input)) => ready.push((to, input)),
+                        Ok(None) => {}
+                        Err(e) => return self.fail_execution(&wid, &e).await,
                     }
                 }
             }
