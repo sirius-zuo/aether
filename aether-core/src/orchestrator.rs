@@ -13,8 +13,9 @@ use serde_json::Value;
 use crate::dag::DagSpec;
 use crate::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
 use crate::{
-    AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, FailurePolicy, HttpAgentFactory,
-    HttpTransport, Outcome, SpawnPolicy, Supervisor, Transport, Workflow,
+    AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, ExecutionRecord, ExecutionStore,
+    FailurePolicy, HttpAgentFactory, HttpTransport, Outcome, SpawnPolicy, Supervisor, Transport,
+    Workflow,
 };
 
 /// Build an executable `AgentNode` for a resolved live instance.
@@ -114,14 +115,19 @@ async fn build_registry_and_workflow(
 }
 
 /// LLM-free coordinator: goal -> planner agent -> DAG -> execute on the Supervisor.
+///
+/// Holds a durable [`ExecutionStore`] shared across every run so checkpoints
+/// survive a restart. Recovery is operator-driven: inspect with
+/// [`recoverable`](Self::recoverable), then [`recover`](Self::recover) a chosen id.
 #[derive(Clone)]
 pub struct Orchestrator {
     store: RegistryStore,
+    execution_store: ExecutionStore,
 }
 
 impl Orchestrator {
-    pub fn new(store: RegistryStore) -> Self {
-        Self { store }
+    pub fn new(store: RegistryStore, execution_store: ExecutionStore) -> Self {
+        Self { store, execution_store }
     }
 
     /// Submit a goal. Resolves the `"plan"` capability, asks that agent for a DAG,
@@ -181,8 +187,55 @@ impl Orchestrator {
             }
         };
 
-        Supervisor::new(registry)
-            .run_with_id(workflow_id, &workflow, goal)
+        // Persist the full DAG (not just entries+edges) so a crashed run can be
+        // re-resolved against the live registry and recovered at startup.
+        let spec = serde_json::to_string(&dag).unwrap_or_default();
+        Supervisor::with_store(registry, self.execution_store.clone())
+            .run_with_id_spec(workflow_id, &workflow, goal, spec)
+            .await
+    }
+
+    /// Executions still `running`/`suspended` in the durable store — the set an
+    /// operator may choose to recover. Recovery is never automatic: inspect this,
+    /// then call [`recover`](Self::recover) per execution you decide to resume.
+    pub async fn recoverable(&self) -> Result<Vec<ExecutionRecord>, AetherError> {
+        self.execution_store.list_active().await
+    }
+
+    /// Recover one execution by id: re-resolve its persisted planner DAG against
+    /// the *current* live registry and continue it via [`Supervisor::recover`]
+    /// (done nodes are not re-run; parked gates stay parked). Fails if the id is
+    /// unknown, its stored DAG is unparseable, or its agents can't be re-resolved.
+    pub async fn recover(&self, workflow_id: uuid::Uuid) -> Outcome {
+        let wid = workflow_id.to_string();
+        let record = match self.execution_store.load_execution(&wid).await {
+            Ok(Some((rec, _nodes))) => rec,
+            Ok(None) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: format!("no such execution '{wid}'"),
+                }
+            }
+            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+        };
+        let dag = match serde_json::from_str::<serde_json::Value>(&record.workflow_spec)
+            .map_err(|e| e.to_string())
+            .and_then(|v| DagSpec::parse(&v).map_err(|e| e.to_string()))
+        {
+            Ok(d) => d,
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: format!("unparseable stored DAG for '{wid}': {e}"),
+                }
+            }
+        };
+        let (registry, workflow) = match build_registry_and_workflow(&self.store, &dag).await {
+            Ok(rw) => rw,
+            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+        };
+        Supervisor::with_store(registry, self.execution_store.clone())
+            .recover(&workflow, workflow_id)
             .await
     }
 
@@ -208,7 +261,7 @@ mod tests {
     async fn store_with(
         entries: Vec<(&str, &str, &str, &[&str], RegistryStatus)>,
     ) -> RegistryStore {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         for (iid, name, url, caps, status) in entries {
             store
                 .register(RegistrationEntry {
@@ -367,8 +420,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_fails_when_no_planner_registered() {
-        let store = RegistryStore::open_in_memory().unwrap();
-        let orch = Orchestrator::new(store);
+        let store = RegistryStore::open_temp();
+        let orch = Orchestrator::new(store, ExecutionStore::open_temp());
         let outcome = orch.submit(serde_json::json!({"goal": "x"})).await;
         assert!(matches!(outcome, Outcome::Failed { .. }));
     }
@@ -399,7 +452,7 @@ mod tests {
             ),
         ])
         .await;
-        let orch = Orchestrator::new(store);
+        let orch = Orchestrator::new(store, ExecutionStore::open_temp());
         let caps = orch.list_capabilities().await.unwrap();
         assert_eq!(caps, vec!["research".to_string(), "write".to_string()]);
     }

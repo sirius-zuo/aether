@@ -27,3 +27,13 @@ pub use transport::{AgentFactory, Transport};
 pub use transport::{HttpAgentFactory, HttpTransport};
 pub use types::{AgentNode, FailurePolicy, HealthStatus, SpawnPolicy};
 pub use workflow::{Edge, EdgePredicate, Workflow, WorkflowBuilder};
+
+/// Test-only: a process-unique temp-file path for a SQLite store. Real files
+/// (never `:memory:`) so recovery tests can drop and reopen the same DB.
+#[cfg(test)]
+pub(crate) fn temp_db_path(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{n}.db", std::process::id()))
+}

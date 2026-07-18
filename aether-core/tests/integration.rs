@@ -13,6 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+/// Unique temp-file execution store (no `:memory:`; each test isolated).
+fn temp_exec_store() -> aether_core::ExecutionStore {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: AtomicU64 = AtomicU64::new(0);
+    let n = C.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("aether-it-exec-{}-{n}.db", std::process::id()));
+    aether_core::ExecutionStore::open(p.to_str().unwrap()).unwrap()
+}
+
 async fn start_echo_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -65,7 +74,7 @@ async fn single_echo_node() {
         entries: vec!["echo".to_string()],
         edges: vec![],
     };
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!({"test": true})).await;
     match outcome {
         // "echo" is the single terminal → v = { "echo": { "test": true } }
@@ -85,7 +94,7 @@ async fn chain_of_two_echo_nodes() {
         .edge("first", "second")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!(42)).await;
     match outcome {
         // "second" is the single terminal → v = { "second": 42 }
@@ -109,7 +118,7 @@ async fn fan_out_fan_in_with_http_servers() {
         .edge("right", "merge")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!("start")).await;
     match outcome {
         Outcome::Success(v) => {
@@ -136,7 +145,7 @@ async fn conditional_routing_fires_matching_edge() {
         .conditional("router", "path-b", |env| env.payload["route"] == "b")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!({"route": "a"})).await;
     assert!(matches!(outcome, Outcome::Success(_)));
 }
@@ -150,7 +159,7 @@ async fn supervisor_events_are_emitted() {
         entries: vec!["node".to_string()],
         edges: vec![],
     };
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let mut rx = sup.watch();
     sup.run(&wf, serde_json::json!(null)).await;
     let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
