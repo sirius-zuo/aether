@@ -61,10 +61,17 @@ pub async fn start(
                             Outcome::Success(_) => "done",
                             Outcome::Timeout { .. } => "timeout",
                             Outcome::Failed { .. } => "failed",
+                            Outcome::Suspended { .. } => "suspended",
                         };
                         let mut wfs = state_bg.active_workflows.lock().unwrap();
                         if let Some(wf) = wfs.get_mut(&workflow_id.to_string()) {
                             wf.status = status.to_string();
+                        }
+                    }
+                    SupervisorEvent::NodeSuspended { workflow_id, .. } => {
+                        let mut wfs = state_bg.active_workflows.lock().unwrap();
+                        if let Some(wf) = wfs.get_mut(&workflow_id.to_string()) {
+                            wf.status = "suspended".to_string();
                         }
                     }
                     _ => {}

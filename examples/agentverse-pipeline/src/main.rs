@@ -131,6 +131,9 @@ async fn main() {
             eprintln!("Pipeline timed out at node '{node}'");
             std::process::exit(1);
         }
+        Outcome::Suspended { workflow_id } => {
+            println!("Pipeline suspended (workflow {workflow_id}) — awaiting a resume decision.");
+        }
     }
 
     println!();

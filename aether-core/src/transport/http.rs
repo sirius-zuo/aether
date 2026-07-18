@@ -49,6 +49,25 @@ impl Transport for HttpTransport {
             })
     }
 
+    async fn resume(&self, req: crate::resume::ResumeRequest) -> Result<Envelope, AetherError> {
+        let url = format!("{}/aether/resume", self.http_url.trim_end_matches('/'));
+        self.client
+            .post(&url)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| AetherError::TransportError {
+                node: self.node_name.clone(),
+                message: e.to_string(),
+            })?
+            .json::<Envelope>()
+            .await
+            .map_err(|e| AetherError::TransportError {
+                node: self.node_name.clone(),
+                message: format!("failed to decode resume response: {}", e),
+            })
+    }
+
     async fn shutdown(&self, _grace: Duration) {}
 }
 
@@ -114,5 +133,31 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HttpTransport>();
         assert_send_sync::<HttpAgentFactory>();
+    }
+
+    #[tokio::test]
+    async fn http_transport_resume_posts_decision() {
+        use crate::resume::{ApprovalDecision, ResumeRequest};
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/aether/resume");
+            then.status(200).json_body(serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000002",
+                "kind": "result",
+                "payload": {"resumed": true},
+                "metadata": {}
+            }));
+        });
+
+        let transport = HttpTransport::new("test", server.base_url());
+        let req = ResumeRequest {
+            session_id: "s1".into(),
+            approval_id: "a1".into(),
+            decision: ApprovalDecision::Approved,
+        };
+        let result = transport.resume(req).await.unwrap();
+        assert_eq!(result.kind, EnvelopeKind::Result);
+        assert_eq!(result.payload["resumed"], true);
+        mock.assert();
     }
 }
