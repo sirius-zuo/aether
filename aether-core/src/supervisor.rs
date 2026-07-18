@@ -429,6 +429,7 @@ impl Supervisor {
 
         // Completed: checkpoint and expand downstream, then continue the loop.
         if let Err(e) = self.store.complete_node(&wid, node_id, &response.payload.to_string()).await {
+            let _ = self.store.finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string())).await;
             return Outcome::Failed { node: node_id.into(), error: e.to_string() };
         }
         // Reactivate the execution row so finalize can succeed it.
@@ -443,7 +444,10 @@ impl Supervisor {
                 match self.node_ready_input(workflow, &wid, &edge.to).await {
                     Ok(Some(input)) => ready.push((edge.to.clone(), input)),
                     Ok(None) => {}
-                    Err(e) => return Outcome::Failed { node: edge.to.clone(), error: e.to_string() },
+                    Err(e) => {
+                        let _ = self.store.finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string())).await;
+                        return Outcome::Failed { node: edge.to.clone(), error: e.to_string() };
+                    }
                 }
             }
         }
