@@ -433,7 +433,7 @@ mod tests {
     async fn complete_node_clears_correlation_after_resume() {
         let store = ExecutionStore::open_in_memory().unwrap();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
-        store.park_node("wf", "a", "s1", "ap1", "tool_approval", "ok?", None).await.unwrap();
+        store.park_node("wf", "a", "s1", "ap1", "tool_approval", "ok?", Some("2026-01-01T00:00:00+00:00")).await.unwrap();
         store.complete_node("wf", "a", r#"{"done":true}"#).await.unwrap();
 
         let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
@@ -441,6 +441,9 @@ mod tests {
         assert_eq!(a.status, NodeStatus::Done);
         assert!(a.session_id.is_none());
         assert!(a.approval_id.is_none());
+        assert!(a.kind.is_none());
+        assert!(a.prompt.is_none());
+        assert!(a.gate_deadline.is_none());
     }
 
     #[tokio::test]
