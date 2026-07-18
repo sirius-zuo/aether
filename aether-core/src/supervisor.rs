@@ -463,6 +463,76 @@ impl Supervisor {
         outcome
     }
 
+    pub async fn active_execution_ids(&self) -> Result<Vec<Uuid>, AetherError> {
+        let active = self.store.list_active().await?;
+        Ok(active
+            .into_iter()
+            .filter_map(|e| Uuid::parse_str(&e.workflow_id).ok())
+            .collect())
+    }
+
+    /// Re-drive one active execution after a restart. Done nodes are not
+    /// re-run; pending/running nodes whose deps are all done are re-dispatched;
+    /// parked nodes stay parked. Assumes unconditional edges (see Global
+    /// Constraints — predicates are not persisted).
+    pub async fn recover(&self, workflow: &Workflow, workflow_id: Uuid) -> Outcome {
+        let wid = workflow_id.to_string();
+        let (exec, nodes) = match self.store.load_execution(&wid).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return Outcome::Failed { node: String::new(), error: "no such execution".into() },
+            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+        };
+
+        let status = |id: &str| nodes.iter().find(|n| n.node_id == id).map(|n| n.status.clone());
+        let output = |id: &str| {
+            nodes
+                .iter()
+                .find(|n| n.node_id == id)
+                .and_then(|n| n.output.as_ref())
+                .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let initial_payload: serde_json::Value =
+            serde_json::from_str(&exec.initial_payload).unwrap_or(serde_json::Value::Null);
+
+        let mut ready: Vec<(String, serde_json::Value)> = Vec::new();
+        for n in &nodes {
+            if n.status != crate::NodeStatus::Pending && n.status != crate::NodeStatus::Running {
+                continue;
+            }
+            let deps: Vec<String> = workflow.incoming(&n.node_id).iter().map(|e| e.from.clone()).collect();
+            if !deps.iter().all(|d| status(d) == Some(crate::NodeStatus::Done)) {
+                continue;
+            }
+            let input = if deps.is_empty() {
+                initial_payload.clone()
+            } else if deps.len() == 1 {
+                output(&deps[0])
+            } else {
+                let map: serde_json::Map<String, serde_json::Value> =
+                    deps.iter().map(|d| (d.clone(), output(d))).collect();
+                serde_json::Value::Object(map)
+            };
+            ready.push((n.node_id.clone(), input));
+        }
+
+        // Reactivate the row (it may have been left 'suspended') before driving.
+        let _ = self
+            .store
+            .finish_execution(&wid, crate::ExecutionStatus::Running, None, None)
+            .await;
+
+        let outcome = match self.drive(workflow, workflow_id, ready).await {
+            Ok(o) => o,
+            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+        };
+        let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
+            workflow_id,
+            result: outcome.clone(),
+        });
+        outcome
+    }
+
     async fn fail_execution(&self, wid: &str, e: &AetherError) -> Result<Outcome, AetherError> {
         let (node, error) = match e {
             AetherError::AgentTimeout { node } => {
@@ -946,5 +1016,68 @@ mod tests {
             Outcome::Success(v) => assert_eq!(v["gate"]["approved"], true),
             other => panic!("expected Success, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn recover_resumes_without_rerunning_done_nodes() {
+        // Transport that records how many times each node is invoked.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static A_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountingTransport(&'static str);
+        #[async_trait]
+        impl Transport for CountingTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                if self.0 == "a" {
+                    A_CALLS.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Envelope { kind: EnvelopeKind::Result, ..msg })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct CountingFactory(&'static str);
+        #[async_trait]
+        impl AgentFactory for CountingFactory {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(CountingTransport(self.0)))
+            }
+        }
+
+        let build_registry = || {
+            let r = AgentRegistry::new();
+            for name in ["a", "b"] {
+                r.register(AgentNode {
+                    name: name.into(),
+                    capabilities: vec![],
+                    factory: Arc::new(CountingFactory(if name == "a" { "a" } else { "b" })),
+                    spawn: SpawnPolicy::PerRequest,
+                    failure: FailurePolicy::default(),
+                    timeout: Duration::from_secs(5),
+                    shutdown_grace: Duration::from_secs(1),
+                    metadata: HashMap::new(),
+                });
+            }
+            r
+        };
+
+        let store = crate::ExecutionStore::open_in_memory().unwrap();
+        let wid = Uuid::new_v4();
+        // Simulate a crash after "a" completed but before "b" ran.
+        let wf = Workflow::builder(&build_registry()).edge("a", "b").build().unwrap();
+        store
+            .create_execution(&wid.to_string(), "{}", "{}", &["a".into(), "b".into()])
+            .await
+            .unwrap();
+        store.complete_node(&wid.to_string(), "a", r#"{"v":1}"#).await.unwrap();
+
+        A_CALLS.store(0, Ordering::SeqCst);
+        let sup = Supervisor::with_store(build_registry(), store.clone());
+        let outcome = sup.recover(&wf, wid).await;
+
+        assert!(matches!(outcome, Outcome::Success(_)));
+        assert_eq!(A_CALLS.load(Ordering::SeqCst), 0, "done node 'a' must not be re-run");
+        let (exec, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        assert_eq!(exec.status, crate::ExecutionStatus::Succeeded);
+        assert!(nodes.iter().find(|n| n.node_id == "b").unwrap().status == crate::NodeStatus::Done);
     }
 }
