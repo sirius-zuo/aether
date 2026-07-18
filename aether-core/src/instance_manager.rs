@@ -113,6 +113,34 @@ impl InstanceManager {
         }
     }
 
+    /// Deliver a resume decision to `node`, routed exactly like `dispatch`.
+    pub async fn resume(
+        &self,
+        node: &AgentNode,
+        req: crate::resume::ResumeRequest,
+    ) -> Result<Envelope, AetherError> {
+        let states = self.states.lock().await;
+        match states.get(&node.name) {
+            Some(NodeState::Singleton { transport, .. }) => {
+                let t = transport.lock().await;
+                let result = tokio::time::timeout(node.timeout, t.resume(req)).await;
+                self.unwrap_timeout(result, &node.name)
+            }
+            Some(NodeState::Pool { transports, cursor }) => {
+                let idx = cursor.fetch_add(1, Ordering::Relaxed) % transports.len();
+                let result = tokio::time::timeout(node.timeout, transports[idx].resume(req)).await;
+                self.unwrap_timeout(result, &node.name)
+            }
+            None => {
+                drop(states);
+                let transport = node.factory.create().await?;
+                let result = tokio::time::timeout(node.timeout, transport.resume(req)).await;
+                transport.shutdown(node.shutdown_grace).await;
+                self.unwrap_timeout(result, &node.name)
+            }
+        }
+    }
+
     /// Shut down all persistent instances gracefully.
     pub async fn shutdown_all(&self, grace: Duration) {
         let states = self.states.lock().await;

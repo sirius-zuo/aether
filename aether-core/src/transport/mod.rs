@@ -1,3 +1,4 @@
+use crate::resume::ResumeRequest;
 use crate::{AetherError, Envelope};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -6,6 +7,15 @@ use std::time::Duration;
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError>;
+
+    /// Deliver a human decision to a suspended agent. Default: unsupported.
+    async fn resume(&self, _req: ResumeRequest) -> Result<Envelope, AetherError> {
+        Err(AetherError::TransportError {
+            node: String::new(),
+            message: "resume not supported by this transport".to_string(),
+        })
+    }
+
     async fn shutdown(&self, grace: Duration);
 }
 
