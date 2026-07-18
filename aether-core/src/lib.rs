@@ -1,6 +1,7 @@
 pub mod dag;
 pub mod envelope;
 pub mod error;
+pub mod execution_store;
 pub mod health_poller;
 pub mod instance_manager;
 pub mod orchestrator;
@@ -16,6 +17,7 @@ pub mod workflow;
 pub use dag::{DagNode, DagSpec};
 pub use envelope::{read_envelope, write_envelope, Envelope, EnvelopeKind};
 pub use error::{AetherError, Outcome};
+pub use execution_store::{ExecutionNodeRecord, ExecutionRecord, ExecutionStatus, ExecutionStore, NodeStatus};
 pub use instance_manager::InstanceManager;
 pub use orchestrator::Orchestrator;
 pub use registry::AgentRegistry;
