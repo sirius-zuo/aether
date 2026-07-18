@@ -359,6 +359,47 @@ impl ExecutionStore {
         )
         .await
     }
+
+    pub async fn expire_gates(&self, now_rfc3339: &str) -> Result<Vec<(String, String)>, AetherError> {
+        let conn = Arc::clone(&self.conn);
+        let now = now_rfc3339.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let expired: Vec<(String, String)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT workflow_id, node_id FROM execution_nodes
+                         WHERE status='suspended' AND gate_deadline IS NOT NULL AND gate_deadline < ?1",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt.query_map(params![&now], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                rows
+            };
+            for (wid, nid) in &expired {
+                tx.execute(
+                    "UPDATE execution_nodes SET status='failed', updated_at=?3
+                     WHERE workflow_id=?1 AND node_id=?2",
+                    params![wid, nid, &now],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE executions SET status='failed', error='gate deadline expired', updated_at=?2
+                     WHERE workflow_id=?1",
+                    params![wid, &now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok::<_, String>(expired)
+        })
+        .await
+        .map_err(store_err)?
+        .map_err(store_err)
+    }
 }
 
 #[cfg(test)]
@@ -455,5 +496,35 @@ mod tests {
         let (exec, _n) = store.load_execution("wf").await.unwrap().unwrap();
         assert_eq!(exec.status, ExecutionStatus::Succeeded);
         assert_eq!(exec.result.as_deref(), Some(r#"{"r":1}"#));
+    }
+
+    #[tokio::test]
+    async fn expire_gates_fails_past_deadline_nodes() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store
+            .park_node("wf", "a", "s1", "a1", "phase_gate", "ok?", Some("2000-01-01T00:00:00+00:00"))
+            .await
+            .unwrap();
+
+        let expired = store.expire_gates("2030-01-01T00:00:00+00:00").await.unwrap();
+        assert_eq!(expired, vec![("wf".to_string(), "a".to_string())]);
+
+        let (exec, nodes) = store.load_execution("wf").await.unwrap().unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(nodes[0].status, NodeStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn expire_gates_ignores_future_and_null_deadlines() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into(), "b".into()]).await.unwrap();
+        store.park_node("wf", "a", "s", "x", "k", "p", None).await.unwrap();
+        store
+            .park_node("wf", "b", "s", "y", "k", "p", Some("2030-01-01T00:00:00+00:00"))
+            .await
+            .unwrap();
+        let expired = store.expire_gates("2020-01-01T00:00:00+00:00").await.unwrap();
+        assert!(expired.is_empty());
     }
 }
