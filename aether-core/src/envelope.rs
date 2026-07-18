@@ -10,6 +10,7 @@ pub enum EnvelopeKind {
     Invoke,
     Result,
     Error,
+    Suspended,
     Ping,
     Pong,
 }
