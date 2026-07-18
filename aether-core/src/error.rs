@@ -25,6 +25,7 @@ pub enum Outcome {
     Success(Value),
     Failed { node: String, error: String },
     Timeout { node: String },
+    Suspended { workflow_id: uuid::Uuid },
 }
 
 #[cfg(test)]
