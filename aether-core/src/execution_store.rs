@@ -261,6 +261,104 @@ impl ExecutionStore {
         .map_err(store_err)?
         .map_err(store_err)
     }
+
+    async fn exec_write(
+        &self,
+        sql: &'static str,
+        args: Vec<Option<String>>,
+    ) -> Result<(), AetherError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let params: Vec<&dyn rusqlite::ToSql> =
+                args.iter().map(|a| a as &dyn rusqlite::ToSql).collect();
+            conn.execute(sql, params.as_slice()).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(store_err)?
+        .map_err(store_err)?;
+        Ok(())
+    }
+
+    pub async fn mark_node_running(&self, workflow_id: &str, node_id: &str) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE execution_nodes SET status='running', updated_at=?3
+             WHERE workflow_id=?1 AND node_id=?2",
+            vec![Some(workflow_id.into()), Some(node_id.into()), Some(now)],
+        )
+        .await
+    }
+
+    pub async fn complete_node(
+        &self,
+        workflow_id: &str,
+        node_id: &str,
+        output_json: &str,
+    ) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE execution_nodes
+             SET status='done', output=?3, session_id=NULL, approval_id=NULL,
+                 kind=NULL, prompt=NULL, gate_deadline=NULL, updated_at=?4
+             WHERE workflow_id=?1 AND node_id=?2",
+            vec![Some(workflow_id.into()), Some(node_id.into()), Some(output_json.into()), Some(now)],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn park_node(
+        &self,
+        workflow_id: &str,
+        node_id: &str,
+        session_id: &str,
+        approval_id: &str,
+        kind: &str,
+        prompt: &str,
+        gate_deadline: Option<&str>,
+    ) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE execution_nodes
+             SET status='suspended', session_id=?3, approval_id=?4, kind=?5,
+                 prompt=?6, gate_deadline=?7, updated_at=?8
+             WHERE workflow_id=?1 AND node_id=?2",
+            vec![
+                Some(workflow_id.into()),
+                Some(node_id.into()),
+                Some(session_id.into()),
+                Some(approval_id.into()),
+                Some(kind.into()),
+                Some(prompt.into()),
+                gate_deadline.map(|s| s.to_string()),
+                Some(now),
+            ],
+        )
+        .await
+    }
+
+    pub async fn finish_execution(
+        &self,
+        workflow_id: &str,
+        status: ExecutionStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE executions SET status=?2, result=?3, error=?4, updated_at=?5
+             WHERE workflow_id=?1",
+            vec![
+                Some(workflow_id.into()),
+                Some(status.as_str().to_string()),
+                result.map(|s| s.to_string()),
+                error.map(|s| s.to_string()),
+                Some(now),
+            ],
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -302,5 +400,57 @@ mod tests {
     async fn load_missing_execution_returns_none() {
         let store = ExecutionStore::open_in_memory().unwrap();
         assert!(store.load_execution("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_node_sets_done_and_output() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store.mark_node_running("wf", "a").await.unwrap();
+        store.complete_node("wf", "a", r#"{"x":1}"#).await.unwrap();
+
+        let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
+        let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, NodeStatus::Done);
+        assert_eq!(a.output.as_deref(), Some(r#"{"x":1}"#));
+    }
+
+    #[tokio::test]
+    async fn park_node_records_correlation() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store.park_node("wf", "a", "s1", "ap1", "phase_gate", "Sign off?", None).await.unwrap();
+
+        let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
+        let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, NodeStatus::Suspended);
+        assert_eq!(a.session_id.as_deref(), Some("s1"));
+        assert_eq!(a.approval_id.as_deref(), Some("ap1"));
+        assert_eq!(a.prompt.as_deref(), Some("Sign off?"));
+    }
+
+    #[tokio::test]
+    async fn complete_node_clears_correlation_after_resume() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store.park_node("wf", "a", "s1", "ap1", "tool_approval", "ok?", None).await.unwrap();
+        store.complete_node("wf", "a", r#"{"done":true}"#).await.unwrap();
+
+        let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
+        let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, NodeStatus::Done);
+        assert!(a.session_id.is_none());
+        assert!(a.approval_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn finish_execution_sets_status_and_result() {
+        let store = ExecutionStore::open_in_memory().unwrap();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store.finish_execution("wf", ExecutionStatus::Succeeded, Some(r#"{"r":1}"#), None).await.unwrap();
+
+        let (exec, _n) = store.load_execution("wf").await.unwrap().unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        assert_eq!(exec.result.as_deref(), Some(r#"{"r":1}"#));
     }
 }
