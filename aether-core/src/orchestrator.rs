@@ -188,7 +188,8 @@ impl Orchestrator {
         };
 
         // Persist the full DAG (not just entries+edges) so a crashed run can be
-        // re-resolved against the live registry and recovered at startup.
+        // re-resolved against the live registry and recovered later via the
+        // operator [`recover`](Self::recover) API.
         let spec = serde_json::to_string(&dag).unwrap_or_default();
         Supervisor::with_store(registry, self.execution_store.clone())
             .run_with_id_spec(workflow_id, &workflow, goal, spec)
@@ -198,6 +199,12 @@ impl Orchestrator {
     /// Executions still `running`/`suspended` in the durable store — the set an
     /// operator may choose to recover. Recovery is never automatic: inspect this,
     /// then call [`recover`](Self::recover) per execution you decide to resume.
+    ///
+    /// Precondition: this returns *every* active row, which in a live process
+    /// includes executions currently being driven by an in-flight
+    /// [`submit`](Self::submit). Only executions with **no active driver** —
+    /// i.e. orphans left by a crash/restart — are safe to recover; see
+    /// [`recover`](Self::recover).
     pub async fn recoverable(&self) -> Result<Vec<ExecutionRecord>, AetherError> {
         self.execution_store.list_active().await
     }
@@ -206,6 +213,13 @@ impl Orchestrator {
     /// the *current* live registry and continue it via [`Supervisor::recover`]
     /// (done nodes are not re-run; parked gates stay parked). Fails if the id is
     /// unknown, its stored DAG is unparseable, or its agents can't be re-resolved.
+    ///
+    /// **Precondition — no concurrent driver.** Call this only for an execution
+    /// that has no active driver in this process (a crash/restart orphan). The
+    /// durable store is shared across all runs, so recovering an id that is
+    /// still being driven by a live [`submit`](Self::submit) starts a second
+    /// `drive` loop over the same rows — duplicate dispatch and interleaved
+    /// checkpoints. The intended use is post-restart recovery of orphaned runs.
     pub async fn recover(&self, workflow_id: uuid::Uuid) -> Outcome {
         let wid = workflow_id.to_string();
         let record = match self.execution_store.load_execution(&wid).await {
