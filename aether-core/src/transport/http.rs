@@ -32,9 +32,16 @@ impl HttpTransport {
 impl Transport for HttpTransport {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
         let url = format!("{}/aether/invoke", self.http_url.trim_end_matches('/'));
+        // Bridge to the AgentVerse built-in envelope contract: the server reads
+        // the user input from `payload.input` (a string). Wrap whatever
+        // node-input payload the orchestrator produced into that shape.
+        let wire = Envelope {
+            payload: serde_json::json!({ "input": crate::payload_text(&msg.payload) }),
+            ..msg
+        };
         self.client
             .post(&url)
-            .json(&msg)
+            .json(&wire)
             .send()
             .await
             .map_err(|e| AetherError::TransportError {
@@ -92,11 +99,13 @@ mod tests {
     async fn http_transport_send_invoke() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method("POST").path("/aether/invoke");
+            when.method("POST")
+                .path("/aether/invoke")
+                .json_body_partial(r#"{"payload": {"input": "hi"}}"#);
             then.status(200).json_body(serde_json::json!({
                 "id": "00000000-0000-0000-0000-000000000001",
                 "kind": "result",
-                "payload": {"output": "hello"},
+                "payload": {"output": "ok"},
                 "metadata": {}
             }));
         });
@@ -106,7 +115,7 @@ mod tests {
         let result = transport.send(env).await.unwrap();
 
         assert_eq!(result.kind, EnvelopeKind::Result);
-        assert_eq!(result.payload["output"], "hello");
+        assert_eq!(result.payload["output"], "ok");
         mock.assert();
     }
 
