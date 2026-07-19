@@ -23,7 +23,8 @@ fn temp_db(prefix: &str) -> String {
 fn temp_registry() -> RegistryStore { RegistryStore::open(&temp_db("aether-it-reg")).unwrap() }
 fn temp_exec() -> ExecutionStore { ExecutionStore::open(&temp_db("aether-it-exec")).unwrap() }
 
-/// Echo worker: returns its input payload as the result.
+/// Echo worker: speaks the built-in-server contract — reads `payload.input`
+/// and returns `{"output": <that>}`.
 async fn start_echo_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -31,10 +32,16 @@ async fn start_echo_server() -> String {
         .route(
             "/aether/invoke",
             post(|Json(env): Json<Envelope>| async move {
+                let input = env
+                    .payload
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(env.payload.clone());
                 (
                     StatusCode::OK,
                     Json(Envelope {
                         kind: EnvelopeKind::Result,
+                        payload: serde_json::json!({ "output": input }),
                         ..env
                     }),
                 )
@@ -45,7 +52,8 @@ async fn start_echo_server() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// Planner: ignores input, returns a fixed two-node DAG referencing the given capabilities.
+/// Planner: ignores input, returns a fixed DAG as `{"output": "<dag json>"}` —
+/// the shape a `Done` result takes on the built-in server.
 async fn start_planner_server(dag: serde_json::Value) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -57,7 +65,7 @@ async fn start_planner_server(dag: serde_json::Value) -> String {
                 async move {
                     let resp = Envelope {
                         kind: EnvelopeKind::Result,
-                        payload: dag,
+                        payload: serde_json::json!({ "output": dag.to_string() }),
                         ..env
                     };
                     (StatusCode::OK, Json(resp))
@@ -117,8 +125,8 @@ async fn end_to_end_plan_and_execute() {
         .submit(serde_json::json!({"goal": "summarize X"}))
         .await;
     match outcome {
-        // "n2" is the single terminal → v = { "n2": { "goal": "summarize X" } }
-        Outcome::Success(v) => assert_eq!(v["n2"]["goal"], "summarize X"),
+        // "n2" is the single terminal → v = { "n2": { "output": "summarize X" } }
+        Outcome::Success(v) => assert_eq!(v["n2"]["output"], "summarize X"),
         other => panic!("expected Success, got {other:?}"),
     }
 }

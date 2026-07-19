@@ -114,6 +114,32 @@ async fn build_registry_and_workflow(
     Ok((registry, workflow))
 }
 
+/// The planner runs on the built-in server, so its `Done` result is
+/// `{"output": "<dag json text>"}`. Pull the JSON object out of that text
+/// (tolerating markdown fences or surrounding prose by slicing first `{` ..
+/// last `}`) so `DagSpec::parse` receives the DAG object.
+fn dag_from_planner_result(payload: &serde_json::Value) -> Result<serde_json::Value, AetherError> {
+    let text = payload
+        .get("output")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AetherError::WorkflowError {
+            message: "planner result missing string `output` field".to_string(),
+        })?;
+    let start = text.find('{');
+    let end = text.rfind('}');
+    let (start, end) = match (start, end) {
+        (Some(s), Some(e)) if e >= s => (s, e),
+        _ => {
+            return Err(AetherError::WorkflowError {
+                message: format!("planner output has no JSON object: {text}"),
+            })
+        }
+    };
+    serde_json::from_str(&text[start..=end]).map_err(|e| AetherError::WorkflowError {
+        message: format!("planner output is not valid JSON: {e}"),
+    })
+}
+
 /// LLM-free coordinator: goal -> planner agent -> DAG -> execute on the Supervisor.
 ///
 /// Holds a durable [`ExecutionStore`] shared across every run so checkpoints
@@ -167,7 +193,16 @@ impl Orchestrator {
             };
         }
 
-        let dag = match DagSpec::parse(&response.payload) {
+        let dag_value = match dag_from_planner_result(&response.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                return Outcome::Failed {
+                    node: "planner".to_string(),
+                    error: e.to_string(),
+                }
+            }
+        };
+        let dag = match DagSpec::parse(&dag_value) {
             Ok(d) => d,
             Err(e) => {
                 return Outcome::Failed {
@@ -469,5 +504,19 @@ mod tests {
         let orch = Orchestrator::new(store, ExecutionStore::open_temp());
         let caps = orch.list_capabilities().await.unwrap();
         assert_eq!(caps, vec!["research".to_string(), "write".to_string()]);
+    }
+
+    #[test]
+    fn dag_from_planner_output_tolerates_fences() {
+        use serde_json::json;
+        let resp = json!({ "output": "```json\n{\"nodes\":[]}\n```" });
+        let dag = super::dag_from_planner_result(&resp).unwrap();
+        assert_eq!(dag, json!({ "nodes": [] }));
+    }
+
+    #[test]
+    fn dag_from_planner_output_errors_without_output_field() {
+        use serde_json::json;
+        assert!(super::dag_from_planner_result(&json!({ "nope": 1 })).is_err());
     }
 }
