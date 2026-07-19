@@ -11,7 +11,10 @@ path = "src/main.rs"
 [dependencies]
 aether-core = { path = "../../aether-core" }
 agentverse = { path = "../../../agentverse/avs-core" }
-axum = { workspace = true }
+agentverse-agent = { path = "../../../agentverse/avs-agent", features = ["http"] }
+agentverse-hitl = { path = "../../../agentverse/avs-hitl" }
+agentverse-session = { path = "../../../agentverse/avs-session" }
+agentverse-tools = { path = "../../../agentverse/avs-tools" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -19,9 +22,6 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-agentverse-agent = { path = "../../../agentverse/avs-agent", features = ["http"] }
-agentverse-hitl = { path = "../../../agentverse/avs-hitl" }
-agentverse-session = { path = "../../../agentverse/avs-session" }
-agentverse-tools = { path = "../../../agentverse/avs-tools" }
 async-trait = { workspace = true }
+axum = { workspace = true }
 reqwest = { workspace = true }

@@ -10,7 +10,6 @@
 //!   MODEL_BASE_URL=http://localhost:9090/v1 \
 //!   cargo run -p example-llm-planner -- "Should we migrate from REST to gRPC?"
 
-mod agent;
 mod prompts;
 
 use std::collections::HashMap;
@@ -19,8 +18,6 @@ use std::sync::Arc;
 use aether_core::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
 use aether_core::{Orchestrator, Outcome};
 use agentverse::{Config, LlmRunner, ProviderConfig};
-
-use agent::{spawn_agent, AgentMode, AgentState};
 
 #[tokio::main]
 async fn main() {
