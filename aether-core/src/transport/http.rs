@@ -111,7 +111,7 @@ mod tests {
         });
 
         let transport = HttpTransport::new("test", server.base_url());
-        let env = Envelope::invoke(serde_json::json!({"input": "hi"}), HashMap::new());
+        let env = Envelope::invoke(serde_json::json!({"goal": "hi"}), HashMap::new());
         let result = transport.send(env).await.unwrap();
 
         assert_eq!(result.kind, EnvelopeKind::Result);
