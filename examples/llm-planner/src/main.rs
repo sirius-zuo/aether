@@ -42,11 +42,7 @@ async fn main() {
 
     let runner = Arc::new(
         LlmRunner::from_config(Config {
-            provider: ProviderConfig::OpenAI {
-                model_name: model_name.clone(),
-                api_key,
-                base_url: Some(base_url),
-            },
+            provider: ProviderConfig::openai(model_name.clone(), api_key, Some(base_url)),
             max_messages: 100,
             tools: vec![],
             prompts_dir: None,
@@ -58,13 +54,62 @@ async fn main() {
     let dag_schema = aether_core::DagSpec::json_schema();
 
     // (name, port, capability, mode, system_prompt, response_format)
-    let agents: Vec<(&str, u16, &str, AgentMode, String, Option<serde_json::Value>)> = vec![
-        ("planner",  9101, "plan",           AgentMode::Planner, prompts::planner_prompt(),              Some(dag_schema)),
-        ("context",  9102, "gather_context", AgentMode::Worker,  prompts::CONTEXT_PROMPT.to_string(),    None),
-        ("pros",     9103, "analyze_pros",   AgentMode::Worker,  prompts::PROS_PROMPT.to_string(),       None),
-        ("cons",     9104, "analyze_cons",   AgentMode::Worker,  prompts::CONS_PROMPT.to_string(),       None),
-        ("cost",     9105, "assess_cost",    AgentMode::Worker,  prompts::COST_PROMPT.to_string(),       None),
-        ("synth",    9106, "synthesize",     AgentMode::Worker,  prompts::SYNTH_PROMPT.to_string(),      None),
+    let agents: Vec<(
+        &str,
+        u16,
+        &str,
+        AgentMode,
+        String,
+        Option<serde_json::Value>,
+    )> = vec![
+        (
+            "planner",
+            9101,
+            "plan",
+            AgentMode::Planner,
+            prompts::planner_prompt(),
+            Some(dag_schema),
+        ),
+        (
+            "context",
+            9102,
+            "gather_context",
+            AgentMode::Worker,
+            prompts::CONTEXT_PROMPT.to_string(),
+            None,
+        ),
+        (
+            "pros",
+            9103,
+            "analyze_pros",
+            AgentMode::Worker,
+            prompts::PROS_PROMPT.to_string(),
+            None,
+        ),
+        (
+            "cons",
+            9104,
+            "analyze_cons",
+            AgentMode::Worker,
+            prompts::CONS_PROMPT.to_string(),
+            None,
+        ),
+        (
+            "cost",
+            9105,
+            "assess_cost",
+            AgentMode::Worker,
+            prompts::COST_PROMPT.to_string(),
+            None,
+        ),
+        (
+            "synth",
+            9106,
+            "synthesize",
+            AgentMode::Worker,
+            prompts::SYNTH_PROMPT.to_string(),
+            None,
+        ),
     ];
 
     let store = RegistryStore::open("llm-planner-registry.db").expect("registry store");
