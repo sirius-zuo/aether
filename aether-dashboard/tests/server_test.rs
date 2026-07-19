@@ -8,6 +8,14 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
+fn temp_exec_store() -> aether_core::ExecutionStore {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: AtomicU64 = AtomicU64::new(0);
+    let n = C.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("aether-dash-exec-{}-{n}.db", std::process::id()));
+    aether_core::ExecutionStore::open(p.to_str().unwrap()).unwrap()
+}
+
 struct EchoTransport;
 
 #[async_trait]
@@ -46,7 +54,7 @@ async fn start_test_server() -> (Arc<AppState>, u16) {
             "claude-opus-4-7".to_string(),
         )]),
     });
-    let supervisor = Arc::new(Supervisor::new(reg));
+    let supervisor = Arc::new(Supervisor::with_store(reg, temp_exec_store()));
     let state = AppState::new(Arc::clone(&supervisor));
     let config = DashboardConfig {
         port: 0,
@@ -87,7 +95,7 @@ async fn get_agents_returns_json_with_registered_agent() {
 #[tokio::test]
 async fn auth_token_blocks_unauthenticated_requests() {
     let reg = AgentRegistry::new();
-    let supervisor = Arc::new(Supervisor::new(reg));
+    let supervisor = Arc::new(Supervisor::with_store(reg, temp_exec_store()));
     let state = AppState::new(supervisor);
     let config = DashboardConfig {
         port: 0,

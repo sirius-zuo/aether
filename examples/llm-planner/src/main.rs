@@ -67,7 +67,7 @@ async fn main() {
         ("synth",    9106, "synthesize",     AgentMode::Worker,  prompts::SYNTH_PROMPT.to_string(),      None),
     ];
 
-    let store = RegistryStore::open_in_memory().expect("registry store");
+    let store = RegistryStore::open("llm-planner-registry.db").expect("registry store");
 
     for (name, port, capability, mode, system_prompt, response_format) in agents {
         spawn_agent(Arc::new(AgentState {
@@ -108,7 +108,9 @@ async fn main() {
 
     let goal = serde_json::json!({ "goal": goal_text });
 
-    match Orchestrator::new(store).submit(goal).await {
+    let execution_store =
+        aether_core::ExecutionStore::open("llm-planner-executions.db").expect("execution store");
+    match Orchestrator::new(store, execution_store).submit(goal).await {
         Outcome::Success(result) => {
             // result is now { "synth": { "message": "…" } } — pick the first terminal's message
             let text = result

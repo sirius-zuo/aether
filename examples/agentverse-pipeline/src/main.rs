@@ -87,7 +87,11 @@ async fn main() {
         .expect("workflow build failed");
 
     // ── Supervisor + Dashboard ─────────────────────────────────────────────
-    let supervisor = Arc::new(Supervisor::new(registry));
+    let exec_db_path = std::env::var("AETHER_EXEC_DB_PATH")
+        .unwrap_or_else(|_| "agentverse-pipeline-executions.db".to_string());
+    let execution_store =
+        aether_core::ExecutionStore::open(&exec_db_path).expect("open execution store");
+    let supervisor = Arc::new(Supervisor::with_store(registry, execution_store));
     let state = AppState::new(Arc::clone(&supervisor));
 
     let addr = aether_dashboard::start(

@@ -173,11 +173,22 @@ mod tests {
     use super::*;
     use crate::engine::McpEngine;
     use aether_core::orchestrator::Orchestrator;
-    use aether_core::registry_store::RegistryStore;
+
+    fn temp_stores() -> (aether_core::registry_store::RegistryStore, aether_core::ExecutionStore) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static C: AtomicU64 = AtomicU64::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("aether-mcp-jsonrpc-{}-{n}", std::process::id()));
+        let reg = aether_core::registry_store::RegistryStore::open(
+            base.with_extension("reg.db").to_str().unwrap()).unwrap();
+        let exec = aether_core::ExecutionStore::open(
+            base.with_extension("exec.db").to_str().unwrap()).unwrap();
+        (reg, exec)
+    }
 
     fn engine() -> McpEngine {
-        let store = RegistryStore::open_in_memory().unwrap();
-        McpEngine::new(Orchestrator::new(store))
+        let (reg, exec) = temp_stores();
+        McpEngine::new(Orchestrator::new(reg, exec))
     }
 
     #[tokio::test]

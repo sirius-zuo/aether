@@ -24,8 +24,12 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(7800);
 
+    let exec_db_path = std::env::var("AETHER_EXEC_DB_PATH")
+        .unwrap_or_else(|_| "aether-executions.db".to_string());
     let store = RegistryStore::open(&db_path).expect("open registry store");
-    let engine = McpEngine::new(Orchestrator::new(store));
+    let execution_store =
+        aether_core::ExecutionStore::open(&exec_db_path).expect("open execution store");
+    let engine = McpEngine::new(Orchestrator::new(store, execution_store));
 
     match transport.as_str() {
         "http" => {
