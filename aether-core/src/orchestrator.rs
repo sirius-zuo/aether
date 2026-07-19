@@ -13,9 +13,9 @@ use serde_json::Value;
 use crate::dag::DagSpec;
 use crate::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
 use crate::{
-    AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, ExecutionRecord, ExecutionStore,
-    FailurePolicy, HttpAgentFactory, HttpTransport, Outcome, SpawnPolicy, Supervisor, Transport,
-    Workflow,
+    AetherError, AgentNode, AgentRegistry, ApprovalDecision, Envelope, EnvelopeKind,
+    ExecutionRecord, ExecutionStore, FailurePolicy, HttpAgentFactory, HttpTransport, NodeStatus,
+    Outcome, SpawnPolicy, Supervisor, Transport, Workflow,
 };
 
 /// Build an executable `AgentNode` for a resolved live instance.
@@ -285,6 +285,80 @@ impl Orchestrator {
         };
         Supervisor::with_store(registry, self.execution_store.clone())
             .recover(&workflow, workflow_id)
+            .await
+    }
+
+    /// The id of the (first) node currently parked awaiting approval, if any.
+    /// Loads the persisted execution and returns the node whose status is
+    /// [`NodeStatus::Suspended`]. `Ok(None)` when the execution doesn't exist
+    /// or nothing is suspended.
+    pub async fn suspended_node(
+        &self,
+        workflow_id: uuid::Uuid,
+    ) -> Result<Option<String>, AetherError> {
+        match self
+            .execution_store
+            .load_execution(&workflow_id.to_string())
+            .await?
+        {
+            Some((_rec, nodes)) => Ok(nodes
+                .into_iter()
+                .find(|n| n.status == NodeStatus::Suspended)
+                .map(|n| n.node_id)),
+            None => Ok(None),
+        }
+    }
+
+    /// Approve/reject a parked node and re-drive the execution to its next
+    /// stopping point (completion, failure, or the next suspend). Mirrors
+    /// [`recover`](Self::recover)'s reconstruction (load the persisted DAG,
+    /// re-resolve it against the live registry) and delegates to the existing
+    /// [`Supervisor::resume_execution`].
+    pub async fn resume_execution(
+        &self,
+        workflow_id: uuid::Uuid,
+        node: &str,
+        decision: ApprovalDecision,
+    ) -> Outcome {
+        let wid = workflow_id.to_string();
+        let record = match self.execution_store.load_execution(&wid).await {
+            Ok(Some((rec, _nodes))) => rec,
+            Ok(None) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: format!("no such execution '{wid}'"),
+                }
+            }
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
+        };
+        let dag = match serde_json::from_str::<serde_json::Value>(&record.workflow_spec)
+            .map_err(|e| e.to_string())
+            .and_then(|v| DagSpec::parse(&v).map_err(|e| e.to_string()))
+        {
+            Ok(d) => d,
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: format!("unparseable stored DAG for '{wid}': {e}"),
+                }
+            }
+        };
+        let (registry, workflow) = match build_registry_and_workflow(&self.store, &dag).await {
+            Ok(rw) => rw,
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
+        };
+        Supervisor::with_store(registry, self.execution_store.clone())
+            .resume_execution(workflow_id, &workflow, node, decision)
             .await
     }
 
