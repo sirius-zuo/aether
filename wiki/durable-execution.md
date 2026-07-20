@@ -117,31 +117,24 @@ classDiagram
     InstanceManager --> NodeState : Singleton/Pool keyed by node name
 ```
 
-`ExecutionStore` mirrors `RegistryStore`'s pattern: `rusqlite` behind
-`Arc<Mutex<Connection>>`, every operation through `tokio::task::spawn_blocking`,
-`CREATE TABLE IF NOT EXISTS` in `open()` (no migration crate). `executions`
-holds one row per run (status, the serialized `workflow_spec` needed to
-rebuild the ready queue, terminal `result`/`error`); `execution_nodes` holds
-one row per node per run, including a suspend-correlation group —
-`session_id`, `approval_id`, `kind`, `prompt`, `gate_deadline` — populated
-only while parked. `complete_node` sets `status='done'` and clears every
-correlation column in the same `UPDATE`, whether completing normally or
-post-resume. `exec_write` is the private helper every single-row mutation
-funnels through; `create_execution` and `expire_gates` use an explicit
-`Connection::transaction` because they touch multiple rows atomically.
+`ExecutionStore` mirrors `RegistryStore`: `rusqlite` behind
+`Arc<Mutex<Connection>>`, every op via `spawn_blocking`, `CREATE TABLE IF NOT
+EXISTS` in `open()` (no migration crate). `executions` holds one row per run;
+`execution_nodes` one row per node with a suspend-correlation group
+(`session_id`, `approval_id`, `kind`, `prompt`, `gate_deadline`) populated only
+while parked and cleared by `complete_node` in the same `UPDATE` that sets
+`status='done'`. `exec_write` funnels single-row writes;
+`create_execution`/`expire_gates` use `Connection::transaction` for atomicity.
 
 `RegistryStore` is the equivalent store for live agent instances: `agents`
 (keyed by `instance_id`, unique on `http_url`) plus an `events` table fed by
-`add_event`. `register` deletes any existing row with the same `http_url`
-before inserting, so a re-registering agent process replaces its own prior
-identity rather than accumulating duplicates. `registry_server.rs`
-(`make_registry_router`) is the HTTP surface agents call to self-register,
-deregister, and push events; `aether-core/src/bin/aether.rs` wires that
-router together with a `HealthPoller` over one shared `RegistryStore`.
-`HealthPoller::run` loops on `interval` and `poll_once` GETs
-`{http_url}/health`, tracking consecutive misses per `instance_id` in a
-caller-owned `HashMap` — `Unhealthy` only after `failure_threshold` (3)
-consecutive misses, `Healthy` again after one success.
+`add_event`; `register` deletes any existing same-`http_url` row first, so a
+re-registering process replaces its identity instead of duplicating it.
+`registry_server.rs` (`make_registry_router`) is the HTTP surface for
+self-register/deregister/events, wired in `aether-core/src/bin/aether.rs` with
+a `HealthPoller` over one shared `RegistryStore`. `poll_once` GETs
+`{http_url}/health` on an interval, tracking consecutive misses per
+`instance_id` — `Unhealthy` after 3, `Healthy` again after one success.
 
 `InstanceManager` is `Supervisor`'s live-process handle, separate from the
 `AgentRegistry` of node *definitions* (see
