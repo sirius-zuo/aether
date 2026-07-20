@@ -29,8 +29,14 @@ async fn main() {
 }
 
 async fn handle_invoke(Json(env): Json<Envelope>) -> impl IntoResponse {
+    let input = env
+        .payload
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| env.payload.clone());
     let response = Envelope {
         kind: EnvelopeKind::Result,
+        payload: serde_json::json!({ "output": input }),
         ..env
     };
     (StatusCode::OK, Json(response))

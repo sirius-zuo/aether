@@ -82,8 +82,11 @@ impl RegistryStore {
         })
     }
 
-    pub fn open_in_memory() -> Result<Self, AetherError> {
-        Self::open(":memory:")
+    /// Test-only: open a fresh SQLite registry backed by a unique temp file.
+    #[cfg(test)]
+    pub(crate) fn open_temp() -> Self {
+        Self::open(crate::temp_db_path("aether-registry").to_str().expect("utf8 temp path"))
+            .expect("open temp registry store")
     }
 
     pub async fn register(&self, entry: RegistrationEntry) -> Result<(), AetherError> {
@@ -253,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_and_list() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let entry = RegistrationEntry {
             instance_id: "inst-1".to_string(),
             name: "calc".to_string(),
@@ -273,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn deregister_removes_entry() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let entry = RegistrationEntry {
             instance_id: "inst-2".to_string(),
             name: "calc".to_string(),
@@ -292,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_url_reregister_replaces_instance() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let url = "http://127.0.0.1:9000";
         store
             .register(RegistrationEntry {
@@ -327,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_health_changes_status() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         store
             .register(RegistrationEntry {
                 instance_id: "inst-3".to_string(),
@@ -355,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_by_name_filters_correctly() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         store
             .register(RegistrationEntry {
                 instance_id: "a1".to_string(),

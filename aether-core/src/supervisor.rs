@@ -70,12 +70,6 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(registry: AgentRegistry) -> Self {
-        let store = crate::ExecutionStore::open_in_memory()
-            .expect("in-memory execution store");
-        Self::with_store(registry, store)
-    }
-
     pub fn with_store(registry: AgentRegistry, store: crate::ExecutionStore) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         Self {
@@ -109,13 +103,28 @@ impl Supervisor {
         workflow: &Workflow,
         initial_payload: serde_json::Value,
     ) -> Outcome {
+        let spec = serialize_workflow_spec(workflow);
+        self.run_with_id_spec(workflow_id, workflow, initial_payload, spec).await
+    }
+
+    /// Like [`run_with_id`], but persists a caller-supplied `workflow_spec`
+    /// string instead of the generic `{entries, edges}` derived from the
+    /// workflow. The orchestrator uses this to store the full planner DAG so a
+    /// crashed run can be re-resolved and recovered at startup.
+    pub async fn run_with_id_spec(
+        &self,
+        workflow_id: Uuid,
+        workflow: &Workflow,
+        initial_payload: serde_json::Value,
+        workflow_spec: String,
+    ) -> Outcome {
         let _ = self.event_tx.send(SupervisorEvent::WorkflowStarted {
             workflow_id,
             entries: workflow.entries.clone(),
         });
 
         // Persist the execution + one pending row per node.
-        let spec = serialize_workflow_spec(workflow);
+        let spec = workflow_spec;
         let node_ids: Vec<String> = workflow.all_nodes().into_iter().collect();
         if let Err(e) = self
             .store
@@ -698,7 +707,7 @@ mod tests {
             entries: vec!["only".to_string()],
             edges: vec![],
         };
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!({"msg": "hi"})).await;
         assert!(matches!(outcome, Outcome::Success(_)));
     }
@@ -707,7 +716,7 @@ mod tests {
     async fn chain_passes_payload_through() {
         let r = reg(&["a", "b"]);
         let wf = Workflow::builder(&r).edge("a", "b").build().unwrap();
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!(42)).await;
         // "b" is the single terminal → result is { "b": 42 }
         if let Outcome::Success(v) = outcome {
@@ -727,7 +736,7 @@ mod tests {
             .edge("right", "merge")
             .build()
             .unwrap();
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!("start")).await;
         if let Outcome::Success(v) = outcome {
             // "merge" is the single terminal, receives named map from left+right
@@ -746,7 +755,7 @@ mod tests {
             entries: vec!["x".to_string()],
             edges: vec![],
         };
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let mut rx = sup.watch();
         sup.run(&wf, serde_json::json!(null)).await;
         let event = rx.try_recv().unwrap();
@@ -793,7 +802,7 @@ mod tests {
             entries: vec!["worker".to_string()],
             edges: vec![],
         };
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!(null)).await;
         match outcome {
             Outcome::Success(v) => {
@@ -815,7 +824,7 @@ mod tests {
             .edge("right", "merge")
             .build()
             .unwrap();
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!("start")).await;
         if let Outcome::Success(v) = outcome {
             // "merge" is the single terminal → v = { "merge": { "left": "start", "right": "start" } }
@@ -836,7 +845,7 @@ mod tests {
             .edge("root", "b")
             .build()
             .unwrap();
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!("payload")).await;
         if let Outcome::Success(v) = outcome {
             assert!(v.get("a").is_some(), "terminal 'a' missing from result map");
@@ -850,7 +859,7 @@ mod tests {
     async fn single_terminal_result_wrapped_in_map() {
         let r = reg(&["a", "b"]);
         let wf = Workflow::builder(&r).edge("a", "b").build().unwrap();
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!(42)).await;
         if let Outcome::Success(v) = outcome {
             assert_eq!(v["b"], 42, "single terminal should appear under key 'b'");
@@ -902,7 +911,7 @@ mod tests {
             entries: vec!["bad".to_string()],
             edges: vec![],
         };
-        let sup = Supervisor::new(r);
+        let sup = Supervisor::with_store(r, crate::ExecutionStore::open_temp());
         let outcome = sup.run(&wf, serde_json::json!("data")).await;
         assert!(
             matches!(outcome, Outcome::Success(_)),
@@ -950,7 +959,7 @@ mod tests {
         r.register(mk_node("after"));
         let wf = Workflow::builder(&r).edge("gate", "after").build().unwrap();
 
-        let store = crate::ExecutionStore::open_in_memory().unwrap();
+        let store = crate::ExecutionStore::open_temp();
         let sup = Supervisor::with_store(r, store.clone());
         let wid = uuid::Uuid::new_v4();
         let outcome = sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
@@ -1010,7 +1019,7 @@ mod tests {
         });
         let wf = Workflow::builder(&r).entry("gate").build().unwrap();
 
-        let store = crate::ExecutionStore::open_in_memory().unwrap();
+        let store = crate::ExecutionStore::open_temp();
         let sup = Supervisor::with_store(r, store.clone());
         let wid = Uuid::new_v4();
 
@@ -1068,7 +1077,7 @@ mod tests {
             r
         };
 
-        let store = crate::ExecutionStore::open_in_memory().unwrap();
+        let store = crate::ExecutionStore::open_temp();
         let wid = Uuid::new_v4();
         // Simulate a crash after "a" completed but before "b" ran.
         let wf = Workflow::builder(&build_registry()).edge("a", "b").build().unwrap();

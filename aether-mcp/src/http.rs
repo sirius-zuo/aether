@@ -48,12 +48,24 @@ pub async fn serve_http(engine: McpEngine, addr: SocketAddr) -> std::io::Result<
 mod tests {
     use super::*;
     use aether_core::orchestrator::Orchestrator;
-    use aether_core::registry_store::RegistryStore;
     use tokio::net::TcpListener;
+
+    fn temp_stores() -> (aether_core::registry_store::RegistryStore, aether_core::ExecutionStore) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static C: AtomicU64 = AtomicU64::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("aether-mcp-http-{}-{n}", std::process::id()));
+        let reg = aether_core::registry_store::RegistryStore::open(
+            base.with_extension("reg.db").to_str().unwrap()).unwrap();
+        let exec = aether_core::ExecutionStore::open(
+            base.with_extension("exec.db").to_str().unwrap()).unwrap();
+        (reg, exec)
+    }
 
     #[tokio::test]
     async fn post_initialize_over_http() {
-        let engine = McpEngine::new(Orchestrator::new(RegistryStore::open_in_memory().unwrap()));
+        let (reg, exec) = temp_stores();
+        let engine = McpEngine::new(Orchestrator::new(reg, exec));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = router(engine);
@@ -73,7 +85,8 @@ mod tests {
     }
 
     async fn spawn() -> SocketAddr {
-        let engine = McpEngine::new(Orchestrator::new(RegistryStore::open_in_memory().unwrap()));
+        let (reg, exec) = temp_stores();
+        let engine = McpEngine::new(Orchestrator::new(reg, exec));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = router(engine);

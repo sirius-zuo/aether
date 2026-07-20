@@ -13,6 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+/// Unique temp-file execution store (no `:memory:`; each test isolated).
+fn temp_exec_store() -> aether_core::ExecutionStore {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: AtomicU64 = AtomicU64::new(0);
+    let n = C.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("aether-it-exec-{}-{n}.db", std::process::id()));
+    aether_core::ExecutionStore::open(p.to_str().unwrap()).unwrap()
+}
+
 async fn start_echo_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -20,8 +29,52 @@ async fn start_echo_server() -> String {
         .route(
             "/aether/invoke",
             post(|Json(env): Json<Envelope>| async move {
+                // Speaks the built-in-server contract: read `payload.input`,
+                // return `{"output": <that>}`.
+                let input = env
+                    .payload
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(env.payload.clone());
                 let resp = Envelope {
                     kind: EnvelopeKind::Result,
+                    payload: serde_json::json!({ "output": input }),
+                    ..env
+                };
+                (StatusCode::OK, Json(resp)) as (_, _)
+            }),
+        )
+        .route(
+            "/health",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status":"healthy"})),
+                )
+            }),
+        );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://127.0.0.1:{}", port)
+}
+
+/// Like `start_echo_server`, but prefixes the echoed text so two branches of a
+/// fan-in can be told apart in the merged result.
+async fn start_prefixed_echo_server(prefix: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = Router::new()
+        .route(
+            "/aether/invoke",
+            post(move |Json(env): Json<Envelope>| async move {
+                let input = env
+                    .payload
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let resp = Envelope {
+                    kind: EnvelopeKind::Result,
+                    payload: serde_json::json!({ "output": format!("{prefix}{input}") }),
                     ..env
                 };
                 (StatusCode::OK, Json(resp)) as (_, _)
@@ -65,11 +118,11 @@ async fn single_echo_node() {
         entries: vec!["echo".to_string()],
         edges: vec![],
     };
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!({"test": true})).await;
     match outcome {
-        // "echo" is the single terminal → v = { "echo": { "test": true } }
-        Outcome::Success(v) => assert_eq!(v["echo"]["test"], true),
+        // "echo" is the single terminal → v = { "echo": { "output": "true" } }
+        Outcome::Success(v) => assert_eq!(v["echo"]["output"], "true"),
         other => panic!("expected Success, got {:?}", other),
     }
 }
@@ -85,23 +138,26 @@ async fn chain_of_two_echo_nodes() {
         .edge("first", "second")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!(42)).await;
     match outcome {
-        // "second" is the single terminal → v = { "second": 42 }
-        Outcome::Success(v) => assert_eq!(v["second"], 42),
+        // "second" is the single terminal → v = { "second": { "output": "42" } }
+        Outcome::Success(v) => assert_eq!(v["second"]["output"], "42"),
         other => panic!("expected Success, got {:?}", other),
     }
 }
 
 #[tokio::test]
 async fn fan_out_fan_in_with_http_servers() {
-    let urls: Vec<String> = futures::future::join_all((0..4).map(|_| start_echo_server())).await;
+    let intake_url = start_echo_server().await;
+    let left_url = start_prefixed_echo_server("L:").await;
+    let right_url = start_prefixed_echo_server("R:").await;
+    let merge_url = start_echo_server().await;
     let r = AgentRegistry::new();
-    r.register(echo_node("intake", &urls[0]));
-    r.register(echo_node("left", &urls[1]));
-    r.register(echo_node("right", &urls[2]));
-    r.register(echo_node("merge", &urls[3]));
+    r.register(echo_node("intake", &intake_url));
+    r.register(echo_node("left", &left_url));
+    r.register(echo_node("right", &right_url));
+    r.register(echo_node("merge", &merge_url));
     let wf = Workflow::builder(&r)
         .edge("intake", "left")
         .edge("intake", "right")
@@ -109,14 +165,16 @@ async fn fan_out_fan_in_with_http_servers() {
         .edge("right", "merge")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!("start")).await;
     match outcome {
         Outcome::Success(v) => {
-            // "merge" is the single terminal; it receives named map { "left": …, "right": … }
-            assert!(v["merge"].is_object(), "fan-in result should be a named map, got: {v}");
-            assert!(v["merge"].get("left").is_some());
-            assert!(v["merge"].get("right").is_some());
+            // "merge" is the single terminal. It received the named fan-in map
+            // { "left": {"output": "L:start"}, "right": {"output": "R:start"} }
+            // as its input; the {input}/{output} contract flattens that to text
+            // (both branches' distinct contributions joined, `left` before
+            // `right` since the fan-in map is key-sorted) before echoing it back.
+            assert_eq!(v["merge"]["output"], "L:start\n\n---\n\nR:start");
         }
         other => panic!("expected Success, got {:?}", other),
     }
@@ -136,7 +194,7 @@ async fn conditional_routing_fires_matching_edge() {
         .conditional("router", "path-b", |env| env.payload["route"] == "b")
         .build()
         .unwrap();
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let outcome = sup.run(&wf, serde_json::json!({"route": "a"})).await;
     assert!(matches!(outcome, Outcome::Success(_)));
 }
@@ -150,7 +208,7 @@ async fn supervisor_events_are_emitted() {
         entries: vec!["node".to_string()],
         edges: vec![],
     };
-    let sup = Supervisor::new(r);
+    let sup = Supervisor::with_store(r, temp_exec_store());
     let mut rx = sup.watch();
     sup.run(&wf, serde_json::json!(null)).await;
     let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

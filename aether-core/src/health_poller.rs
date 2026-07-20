@@ -107,7 +107,7 @@ mod tests {
             then.status(200).body("ok");
         });
 
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let _id = register_agent(&store, &server.base_url()).await;
 
         let poller = HealthPoller {
@@ -124,7 +124,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_agent_marked_unhealthy_after_threshold() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let _id = register_agent(&store, "http://127.0.0.1:1").await;
 
         let poller = HealthPoller {
@@ -154,7 +154,7 @@ mod tests {
             then.status(200);
         });
 
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let _id = register_agent(&store, &server.base_url()).await;
 
         let poller = HealthPoller {

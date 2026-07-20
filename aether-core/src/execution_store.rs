@@ -128,8 +128,13 @@ impl ExecutionStore {
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
-    pub fn open_in_memory() -> Result<Self, AetherError> {
-        Self::open(":memory:")
+    /// Test-only: open a fresh SQLite store backed by a unique temp file.
+    /// Durability tests use real files (never `:memory:`) so drop+reopen can
+    /// exercise a true restart.
+    #[cfg(test)]
+    pub(crate) fn open_temp() -> Self {
+        Self::open(crate::temp_db_path("aether-exec").to_str().expect("utf8 temp path"))
+            .expect("open temp execution store")
     }
 
     pub async fn create_execution(
@@ -407,8 +412,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn reopen_file_preserves_execution_state() {
+        let path = crate::temp_db_path("aether-exec-reopen");
+        let p = path.to_str().unwrap();
+        {
+            let store = ExecutionStore::open(p).unwrap();
+            store.create_execution("wf", "{}", "{}", &["a".into(), "b".into()]).await.unwrap();
+            store.complete_node("wf", "a", r#"{"v":1}"#).await.unwrap();
+        } // store dropped -> connection closed, simulating a restart
+
+        let store = ExecutionStore::open(p).unwrap();
+        let (exec, nodes) = store.load_execution("wf").await.unwrap().unwrap();
+        assert_eq!(exec.status, ExecutionStatus::Running);
+        let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
+        assert_eq!(a.status, NodeStatus::Done);
+        assert_eq!(a.output.as_deref(), Some(r#"{"v":1}"#));
+    }
+
+    #[tokio::test]
     async fn create_then_load_execution() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store
             .create_execution(
                 "wf-1",
@@ -427,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_active_returns_running_execution() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store
             .create_execution("wf-2", "{}", "{}", &["a".to_string()])
             .await
@@ -439,13 +462,13 @@ mod tests {
 
     #[tokio::test]
     async fn load_missing_execution_returns_none() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         assert!(store.load_execution("nope").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn complete_node_sets_done_and_output() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store.mark_node_running("wf", "a").await.unwrap();
         store.complete_node("wf", "a", r#"{"x":1}"#).await.unwrap();
@@ -458,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn park_node_records_correlation() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store.park_node("wf", "a", "s1", "ap1", "phase_gate", "Sign off?", None).await.unwrap();
 
@@ -472,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn complete_node_clears_correlation_after_resume() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store.park_node("wf", "a", "s1", "ap1", "tool_approval", "ok?", Some("2026-01-01T00:00:00+00:00")).await.unwrap();
         store.complete_node("wf", "a", r#"{"done":true}"#).await.unwrap();
@@ -489,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_execution_sets_status_and_result() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store.finish_execution("wf", ExecutionStatus::Succeeded, Some(r#"{"r":1}"#), None).await.unwrap();
 
@@ -500,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn expire_gates_fails_past_deadline_nodes() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store
             .park_node("wf", "a", "s1", "a1", "phase_gate", "ok?", Some("2000-01-01T00:00:00+00:00"))
@@ -517,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn expire_gates_ignores_future_and_null_deadlines() {
-        let store = ExecutionStore::open_in_memory().unwrap();
+        let store = ExecutionStore::open_temp();
         store.create_execution("wf", "{}", "{}", &["a".into(), "b".into()]).await.unwrap();
         store.park_node("wf", "a", "s", "x", "k", "p", None).await.unwrap();
         store

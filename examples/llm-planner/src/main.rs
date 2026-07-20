@@ -1,26 +1,29 @@
-//! llm-planner — Aether LLM-planning loop, end to end with real local-LLM agents.
+//! llm-planner — orchestrator driver for the Aether LLM-planning loop.
 //!
-//! One binary spins up six in-process Envelope agents (planner + context +
-//! pros/cons/cost analysts + synthesizer), seeds an in-memory registry, and
-//! submits a goal to the orchestrator. The planner emits a diamond DAG; Aether
-//! fans out to the analysts and fans in to the synthesizer; `main()` prints the
-//! synthesis returned by `Orchestrator::submit`.
+//! The six agents run as **separate processes** (`llm-planner-agent`, one per
+//! `ROLE`+`PORT` on the AgentVerse built-in server). This driver only seeds the
+//! registry so the orchestrator can resolve each capability to a running agent,
+//! submits the goal, and drives the durable run to completion — auto-approving
+//! the `assess_cost` gate whenever the run suspends for human-in-the-loop review.
 //!
-//! Run:
-//!   MODEL_BASE_URL=http://localhost:9090/v1 \
+//! Run (agents must already be listening — see `run.sh`):
 //!   cargo run -p example-llm-planner -- "Should we migrate from REST to gRPC?"
 
-mod agent;
-mod prompts;
-
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use aether_core::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
-use aether_core::{Orchestrator, Outcome};
-use agentverse::{Config, LlmRunner, ProviderConfig};
+use aether_core::{ApprovalDecision, ExecutionStore, Orchestrator, Outcome};
 
-use agent::{spawn_agent, AgentMode, AgentState};
+/// (agent name, port, capability) — the orchestrator resolves `plan` first, then
+/// each DAG node's capability, to `http://127.0.0.1:<port>`.
+const AGENTS: [(&str, u16, &str); 6] = [
+    ("planner", 9101, "plan"),
+    ("context", 9102, "gather_context"),
+    ("pros", 9103, "analyze_pros"),
+    ("cons", 9104, "analyze_cons"),
+    ("cost", 9105, "assess_cost"),
+    ("synth", 9106, "synthesize"),
+];
 
 #[tokio::main]
 async fn main() {
@@ -32,55 +35,9 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let base_url =
-        std::env::var("MODEL_BASE_URL").unwrap_or_else(|_| "http://localhost:9090/v1".to_string());
-    let api_key = std::env::var("MODEL_API_KEY").unwrap_or_default();
-    let model_name =
-        std::env::var("MODEL_NAME").unwrap_or_else(|_| "Qwen3.6-35B-A3B-GGUF".to_string());
+    let store = RegistryStore::open("llm-planner-registry.db").expect("registry store");
 
-    tracing::info!(model = %model_name, base_url = %base_url, "llm-planner example");
-
-    let runner = Arc::new(
-        LlmRunner::from_config(Config {
-            provider: ProviderConfig::OpenAI {
-                model_name: model_name.clone(),
-                api_key,
-                base_url: Some(base_url),
-            },
-            max_messages: 100,
-            tools: vec![],
-            prompts_dir: None,
-            system_prompt: None,
-        })
-        .expect("LlmRunner config"),
-    );
-
-    let dag_schema = aether_core::DagSpec::json_schema();
-
-    // (name, port, capability, mode, system_prompt, response_format)
-    let agents: Vec<(&str, u16, &str, AgentMode, String, Option<serde_json::Value>)> = vec![
-        ("planner",  9101, "plan",           AgentMode::Planner, prompts::planner_prompt(),              Some(dag_schema)),
-        ("context",  9102, "gather_context", AgentMode::Worker,  prompts::CONTEXT_PROMPT.to_string(),    None),
-        ("pros",     9103, "analyze_pros",   AgentMode::Worker,  prompts::PROS_PROMPT.to_string(),       None),
-        ("cons",     9104, "analyze_cons",   AgentMode::Worker,  prompts::CONS_PROMPT.to_string(),       None),
-        ("cost",     9105, "assess_cost",    AgentMode::Worker,  prompts::COST_PROMPT.to_string(),       None),
-        ("synth",    9106, "synthesize",     AgentMode::Worker,  prompts::SYNTH_PROMPT.to_string(),      None),
-    ];
-
-    let store = RegistryStore::open_in_memory().expect("registry store");
-
-    for (name, port, capability, mode, system_prompt, response_format) in agents {
-        spawn_agent(Arc::new(AgentState {
-            name: name.to_string(),
-            port,
-            system_prompt,
-            mode,
-            runner: Arc::clone(&runner),
-            response_format,
-        }))
-        .await
-        .unwrap_or_else(|e| panic!("failed to bind {name} on port {port}: {e}"));
-
+    for (name, port, capability) in AGENTS {
         store
             .register(RegistrationEntry {
                 instance_id: name.to_string(),
@@ -106,15 +63,44 @@ async fn main() {
 
     println!("\nGoal: {goal_text}\n");
 
-    let goal = serde_json::json!({ "goal": goal_text });
+    let execution_store =
+        ExecutionStore::open("llm-planner-executions.db").expect("execution store");
+    let orch = Orchestrator::new(store, execution_store);
 
-    match Orchestrator::new(store).submit(goal).await {
+    let workflow_id = uuid::Uuid::new_v4();
+    let mut outcome = orch
+        .submit_with_id(workflow_id, serde_json::json!({ "input": goal_text }))
+        .await;
+
+    // The `assess_cost` agent gates `exec_command` (HITL) and suspends the run.
+    // This example auto-approves every gate and re-drives to the next stop.
+    while let Outcome::Suspended { workflow_id } = outcome {
+        match orch.suspended_node(workflow_id).await {
+            Ok(Some(node)) => {
+                println!("Node '{node}' suspended for approval — auto-approving.");
+                outcome = orch
+                    .resume_execution(workflow_id, &node, ApprovalDecision::Approved)
+                    .await;
+            }
+            Ok(None) => {
+                eprintln!("Suspended with no parked node; aborting.");
+                break;
+            }
+            Err(e) => {
+                eprintln!("suspended_node error: {e}");
+                break;
+            }
+        }
+    }
+
+    match outcome {
         Outcome::Success(result) => {
-            // result is now { "synth": { "message": "…" } } — pick the first terminal's message
+            // The terminal `synthesize` node is the single terminal, so the first
+            // (and only) value in the result map is its payload: `{ "output": … }`.
             let text = result
                 .as_object()
                 .and_then(|map| map.values().next())
-                .and_then(|v| v.get("message").and_then(|m| m.as_str()))
+                .and_then(|v| v.get("output").and_then(|o| o.as_str()))
                 .map(str::to_string)
                 .unwrap_or_else(|| result.to_string());
             println!("=== Synthesis ===\n\n{text}\n");
@@ -128,7 +114,8 @@ async fn main() {
             std::process::exit(1);
         }
         Outcome::Suspended { workflow_id } => {
-            println!("Run suspended (workflow {workflow_id}), awaiting resume.");
+            eprintln!("Still suspended ({workflow_id}) after resume attempts.");
+            std::process::exit(1);
         }
     }
 }

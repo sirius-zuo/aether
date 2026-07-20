@@ -253,7 +253,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_app() -> Router {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         make_registry_router(store, 30)
     }
 
@@ -307,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_agents_returns_summaries() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let app = make_registry_router(store.clone(), 30);
         post_json(
             app,
@@ -328,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn deregister_returns_204() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let app = make_registry_router(store.clone(), 30);
         let reg = post_json(
             app,
@@ -350,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_event_returns_202() {
-        let store = RegistryStore::open_in_memory().unwrap();
+        let store = RegistryStore::open_temp();
         let app = make_registry_router(store.clone(), 30);
         let reg = post_json(
             app,

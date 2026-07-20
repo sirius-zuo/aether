@@ -8,12 +8,27 @@ rust-version.workspace = true
 name = "llm-planner"
 path = "src/main.rs"
 
+[[bin]]
+name = "llm-planner-agent"
+path = "src/bin/agent.rs"
+
 [dependencies]
 aether-core = { path = "../../aether-core" }
 agentverse = { path = "../../../agentverse/avs-core" }
-axum = { workspace = true }
+agentverse-agent = { path = "../../../agentverse/avs-agent", features = ["http"] }
+agentverse-hitl = { path = "../../../agentverse/avs-hitl" }
+agentverse-session = { path = "../../../agentverse/avs-session" }
+agentverse-strategy = { path = "../../../agentverse/avs-strategy" }
+agentverse-tools = { path = "../../../agentverse/avs-tools" }
+async-trait = { workspace = true }
+schemars = { version = "0.8", features = ["derive"] }
+serde = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+reqwest = { workspace = true }

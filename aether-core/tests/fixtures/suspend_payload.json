@@ -1,0 +1,6 @@
+{
+  "session_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+  "approval_id": "9c5b94b1-35ad-49bb-b118-8e8fc24abf80",
+  "kind": "tool_approval",
+  "prompt": "Approve tool call `delete_file` with args {\"path\":\"/tmp/x\"}?"
+}

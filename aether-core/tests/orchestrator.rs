@@ -7,10 +7,24 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use aether_core::ExecutionStore;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
 
-/// Echo worker: returns its input payload as the result.
+/// Unique temp-file registry+execution stores (no `:memory:`).
+fn temp_db(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: AtomicU64 = AtomicU64::new(0);
+    let n = C.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join(format!("{prefix}-{}-{n}.db", std::process::id()))
+        .to_str().unwrap().to_string()
+}
+fn temp_registry() -> RegistryStore { RegistryStore::open(&temp_db("aether-it-reg")).unwrap() }
+fn temp_exec() -> ExecutionStore { ExecutionStore::open(&temp_db("aether-it-exec")).unwrap() }
+
+/// Echo worker: speaks the built-in-server contract — reads `payload.input`
+/// and returns `{"output": <that>}`.
 async fn start_echo_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -18,10 +32,16 @@ async fn start_echo_server() -> String {
         .route(
             "/aether/invoke",
             post(|Json(env): Json<Envelope>| async move {
+                let input = env
+                    .payload
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(env.payload.clone());
                 (
                     StatusCode::OK,
                     Json(Envelope {
                         kind: EnvelopeKind::Result,
+                        payload: serde_json::json!({ "output": input }),
                         ..env
                     }),
                 )
@@ -32,7 +52,8 @@ async fn start_echo_server() -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// Planner: ignores input, returns a fixed two-node DAG referencing the given capabilities.
+/// Planner: ignores input, returns a fixed DAG as `{"output": "<dag json>"}` —
+/// the shape a `Done` result takes on the built-in server.
 async fn start_planner_server(dag: serde_json::Value) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -44,11 +65,59 @@ async fn start_planner_server(dag: serde_json::Value) -> String {
                 async move {
                     let resp = Envelope {
                         kind: EnvelopeKind::Result,
-                        payload: dag,
+                        payload: serde_json::json!({ "output": dag.to_string() }),
                         ..env
                     };
                     (StatusCode::OK, Json(resp))
                 }
+            }),
+        )
+        .route("/health", get(|| async { StatusCode::OK }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Suspending worker: `/aether/invoke` parks the run (returns a `Suspended`
+/// envelope carrying a `SuspendPayload` with non-empty session/approval ids),
+/// and `/aether/resume` completes it with `{"output": "resumed-ok"}`.
+async fn start_suspending_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = Router::new()
+        .route(
+            "/aether/invoke",
+            post(|Json(env): Json<Envelope>| async move {
+                let payload = serde_json::to_value(aether_core::SuspendPayload {
+                    session_id: "sess-1".to_string(),
+                    approval_id: "appr-1".to_string(),
+                    kind: "phase_gate".to_string(),
+                    prompt: "approve?".to_string(),
+                })
+                .unwrap();
+                (
+                    StatusCode::OK,
+                    Json(Envelope {
+                        kind: EnvelopeKind::Suspended,
+                        payload,
+                        ..env
+                    }),
+                )
+            }),
+        )
+        .route(
+            // The body here is a `ResumeRequest`, not an `Envelope`; ignore it
+            // and return a fresh `Result` envelope.
+            "/aether/resume",
+            post(|Json(_req): Json<serde_json::Value>| async move {
+                (
+                    StatusCode::OK,
+                    Json(Envelope {
+                        id: uuid::Uuid::new_v4(),
+                        kind: EnvelopeKind::Result,
+                        payload: serde_json::json!({ "output": "resumed-ok" }),
+                        metadata: HashMap::new(),
+                    }),
+                )
             }),
         )
         .route("/health", get(|| async { StatusCode::OK }));
@@ -94,26 +163,26 @@ async fn end_to_end_plan_and_execute() {
     });
     let planner_url = start_planner_server(dag).await;
 
-    let store = RegistryStore::open_in_memory().unwrap();
+    let store = temp_registry();
     register_healthy(&store, "p1", "planner", &planner_url, &["plan"]).await;
     register_healthy(&store, "r1", "researcher", &research_url, &["research"]).await;
     register_healthy(&store, "s1", "writer", &synth_url, &["synthesize"]).await;
 
-    let orch = Orchestrator::new(store);
+    let orch = Orchestrator::new(store, temp_exec());
     let outcome = orch
         .submit(serde_json::json!({"goal": "summarize X"}))
         .await;
     match outcome {
-        // "n2" is the single terminal → v = { "n2": { "goal": "summarize X" } }
-        Outcome::Success(v) => assert_eq!(v["n2"]["goal"], "summarize X"),
+        // "n2" is the single terminal → v = { "n2": { "output": "summarize X" } }
+        Outcome::Success(v) => assert_eq!(v["n2"]["output"], "summarize X"),
         other => panic!("expected Success, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn submit_fails_without_planner() {
-    let store = RegistryStore::open_in_memory().unwrap();
-    let orch = Orchestrator::new(store);
+    let store = temp_registry();
+    let orch = Orchestrator::new(store, temp_exec());
     let outcome = orch.submit(serde_json::json!(null)).await;
     assert!(matches!(outcome, Outcome::Failed { .. }));
 }
@@ -121,10 +190,153 @@ async fn submit_fails_without_planner() {
 #[tokio::test]
 async fn submit_fails_on_bad_dag_json() {
     let planner_url = start_planner_server(serde_json::json!({"not": "a dag"})).await;
-    let store = RegistryStore::open_in_memory().unwrap();
+    let store = temp_registry();
     register_healthy(&store, "p1", "planner", &planner_url, &["plan"]).await;
 
-    let orch = Orchestrator::new(store);
+    let orch = Orchestrator::new(store, temp_exec());
     let outcome = orch.submit(serde_json::json!(null)).await;
     assert!(matches!(outcome, Outcome::Failed { .. }));
+}
+
+#[tokio::test]
+async fn recover_by_id_redrives_active_execution_after_reopen() {
+    let worker_url = start_echo_server().await;
+    let reg = temp_registry();
+    register_healthy(&reg, "w1", "worker", &worker_url, &["work"]).await;
+
+    // A two-node DAG a -> b, both capability "work".
+    let dag = serde_json::json!({
+        "nodes": [
+            { "id": "a", "capability": "work", "depends_on": [] },
+            { "id": "b", "capability": "work", "depends_on": ["a"] }
+        ]
+    });
+    let wid = uuid::Uuid::new_v4();
+    let exec_path = temp_db("aether-it-recover");
+
+    // Seed: a done, b pending — as if aether crashed after a completed.
+    {
+        let exec = ExecutionStore::open(&exec_path).unwrap();
+        exec.create_execution(&wid.to_string(), &dag.to_string(), "null",
+            &["a".to_string(), "b".to_string()]).await.unwrap();
+        exec.complete_node(&wid.to_string(), "a", r#"{"v":1}"#).await.unwrap();
+    } // dropped: simulate restart
+
+    let exec = ExecutionStore::open(&exec_path).unwrap();
+    let orch = Orchestrator::new(reg, exec.clone());
+
+    // Operator inspects what's recoverable — the run survived the restart.
+    let active = orch.recoverable().await.unwrap();
+    assert_eq!(active.len(), 1, "one active execution after reopen");
+    assert_eq!(active[0].workflow_id, wid.to_string());
+
+    // Operator deliberately recovers that one id.
+    let outcome = orch.recover(wid).await;
+    assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
+
+    let (record, nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
+    assert!(nodes.iter().find(|n| n.node_id == "b").unwrap().status
+        == aether_core::NodeStatus::Done);
+}
+
+#[tokio::test]
+async fn submit_persists_dag_in_shared_store() {
+    let worker_url = start_echo_server().await;
+    let dag = serde_json::json!({
+        "nodes": [ { "id": "n1", "capability": "work", "depends_on": [] } ]
+    });
+    let planner_url = start_planner_server(dag).await;
+
+    let reg = temp_registry();
+    register_healthy(&reg, "p1", "planner", &planner_url, &["plan"]).await;
+    register_healthy(&reg, "w1", "worker", &worker_url, &["work"]).await;
+
+    let exec = temp_exec();
+    let orch = Orchestrator::new(reg, exec.clone());
+    let wid = uuid::Uuid::new_v4();
+    let outcome = orch.submit_with_id(wid, serde_json::json!({"goal": "x"})).await;
+    assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
+
+    // The shared store still holds the run, and the spec parses back to a DAG.
+    let (record, _nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
+    let v: serde_json::Value = serde_json::from_str(&record.workflow_spec).unwrap();
+    let parsed = aether_core::DagSpec::parse(&v).unwrap();
+    assert_eq!(parsed.nodes[0].id, "n1");
+    assert_eq!(parsed.nodes[0].capability.as_deref(), Some("work"));
+}
+
+#[tokio::test]
+async fn resume_execution_approves_parked_node_and_completes() {
+    let gate_url = start_suspending_server().await;
+    let dag = serde_json::json!({
+        "nodes": [ { "id": "gate", "capability": "approve", "depends_on": [] } ]
+    });
+    let planner_url = start_planner_server(dag).await;
+
+    let reg = temp_registry();
+    register_healthy(&reg, "p1", "planner", &planner_url, &["plan"]).await;
+    register_healthy(&reg, "g1", "gatekeeper", &gate_url, &["approve"]).await;
+
+    let exec = temp_exec();
+    let orch = Orchestrator::new(reg, exec.clone());
+    let wid = uuid::Uuid::new_v4();
+
+    // Submit parks at the gate node.
+    let outcome = orch
+        .submit_with_id(wid, serde_json::json!({ "input": "go" }))
+        .await;
+    assert!(
+        matches!(outcome, Outcome::Suspended { workflow_id } if workflow_id == wid),
+        "got {outcome:?}"
+    );
+
+    // The suspended node is surfaced by the new API.
+    let node = orch.suspended_node(wid).await.unwrap();
+    assert_eq!(node.as_deref(), Some("gate"));
+
+    // Operator approves; the run drives to completion via /aether/resume.
+    let resumed = orch
+        .resume_execution(wid, node.as_deref().unwrap(), aether_core::ApprovalDecision::Approved)
+        .await;
+    match resumed {
+        Outcome::Success(v) => assert_eq!(v["gate"]["output"], "resumed-ok"),
+        other => panic!("expected Success, got {other:?}"),
+    }
+
+    // Durable store reflects completion.
+    let (record, nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
+    assert!(
+        nodes.iter().find(|n| n.node_id == "gate").unwrap().status
+            == aether_core::NodeStatus::Done
+    );
+
+    // Nothing is parked anymore.
+    assert_eq!(orch.suspended_node(wid).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn suspended_node_returns_none_for_completed_and_unknown() {
+    let worker_url = start_echo_server().await;
+    let dag = serde_json::json!({
+        "nodes": [ { "id": "n1", "capability": "work", "depends_on": [] } ]
+    });
+    let planner_url = start_planner_server(dag).await;
+
+    let reg = temp_registry();
+    register_healthy(&reg, "p1", "planner", &planner_url, &["plan"]).await;
+    register_healthy(&reg, "w1", "worker", &worker_url, &["work"]).await;
+
+    let exec = temp_exec();
+    let orch = Orchestrator::new(reg, exec.clone());
+    let wid = uuid::Uuid::new_v4();
+    let outcome = orch.submit_with_id(wid, serde_json::json!({ "input": "x" })).await;
+    assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
+
+    // A completed run has no suspended node.
+    assert_eq!(orch.suspended_node(wid).await.unwrap(), None);
+    // An unknown id is not an error — just None.
+    assert_eq!(orch.suspended_node(uuid::Uuid::new_v4()).await.unwrap(), None);
 }
