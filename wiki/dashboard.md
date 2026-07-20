@@ -287,3 +287,4 @@ Newest first.
 - [Orchestration Core](orchestration-core.md)
 - [Durable Execution](durable-execution.md)
 - [Examples](examples.md)
+- [MCP Server](mcp-server.md)

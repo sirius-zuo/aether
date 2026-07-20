@@ -25,12 +25,12 @@ graph TD
 
 | Page | Covers | Summary |
 | --- | --- | --- |
-| [Orchestration Core](orchestration-core.md) | Registry, Supervisor, Orchestrator, Workflow/DAG builder, types, errors | The composition and execution engine: how agents are registered, workflows are built from a DAG, and a run is supervised to completion. |
-| [Wire Protocol & Transport](wire-protocol-transport.md) | Envelope wire protocol, `transport/http`, `AgentFactory` | The Envelope message contract every agent speaks and the HTTP transport that carries it between the supervisor and agent processes. |
-| [Durable Execution](durable-execution.md) | `execution_store`, `resume`, `instance_manager`, `health_poller`, `registry_store` | Persistence, suspend/resume, human-in-the-loop approvals, operator-driven recovery, and agent instance/health lifecycle. |
-| [Dashboard](dashboard.md) | `aether-dashboard` (SSE event log, state) | The observability service: a live event stream and state snapshot of registered agents and running workflows. |
-| [MCP Server](mcp-server.md) | `aether-mcp` (jsonrpc, engine, job, stdio/http) | Exposes Aether workflow execution as Model Context Protocol tools over stdio and HTTP. |
-| [Examples](examples.md) | `agentverse-pipeline`, `llm-planner` | Runnable end-to-end demonstrations, including a dynamic LLM-planning loop over the `agentverse` agent stack. |
+| [Orchestration Core](orchestration-core.md) | Registry, Supervisor, Orchestrator, Workflow/DAG builder, types, errors | The composition and execution engine of Aether: turns a set of registered agents plus a DAG description into a running, supervised workflow. |
+| [Wire Protocol & Transport](wire-protocol-transport.md) | Envelope wire protocol, `transport/http`, `AgentFactory` | The contract every agent process speaks to Aether — the `Envelope` message shape (`Invoke` in, `Result`/`Error`/`Suspended` back) — and the HTTP mechanics that carry it. |
+| [Durable Execution](durable-execution.md) | `execution_store`, `resume`, `instance_manager`, `health_poller`, `registry_store` | Aether's persistence and lifecycle layer: survives a `Supervisor` crash without re-running finished nodes, lets a node pause for a human decision instead of blocking a thread, and lets an operator recover a crashed run or approve a parked one. |
+| [Dashboard](dashboard.md) | `aether-dashboard` (SSE event log, state) | Aether's read-only observability surface: a live event stream and a state snapshot of registered agents and running workflows, served as a single embedded single-page app over one axum server. |
+| [MCP Server](mcp-server.md) | `aether-mcp` (jsonrpc, engine, job, stdio/http) | A thin sidecar crate + binary that exposes Aether's goal dispatch as Model Context Protocol tools over JSON-RPC 2.0, reachable over either stdio or HTTP. |
+| [Examples](examples.md) | `agentverse-pipeline`, `llm-planner` | Two runnable crates that exercise Aether against live HTTP agents rather than mocks: `agentverse-pipeline`, a minimal static two-node pipeline, and `llm-planner`, a dynamic LLM-planning loop that also demonstrates the durable suspend/resume path. |
 
 ## Maintenance Convention
 

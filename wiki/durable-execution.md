@@ -351,3 +351,6 @@ fresh `Transport`, call it, and `shutdown` it afterward.
 
 - [Orchestration Core](orchestration-core.md)
 - [Wire Protocol & Transport](wire-protocol-transport.md)
+- [Dashboard](dashboard.md)
+- [MCP Server](mcp-server.md)
+- [Examples](examples.md)
