@@ -2,3 +2,5 @@
 .superpowers/
 .DS_Store
 docs/
+.generate-wiki/
+.codegraph/
