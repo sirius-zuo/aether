@@ -30,7 +30,16 @@ async fn main() {
         .expect("ROLE env (plan|gather_context|analyze_pros|analyze_cons|assess_cost|synthesize)");
     // PORT is read by the built-in server via HttpConfig::from_env; ensure it is set.
     let port = std::env::var("PORT").expect("PORT env");
-    // Loopback dev server: allow the unauthenticated bind.
+    // Loopback dev server: bind 127.0.0.1 (the built-in server defaults HOST to
+    // 0.0.0.0) and allow the unauthenticated bind. Respect an explicit HOST if
+    // the caller set one.
+    if std::env::var("HOST")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .is_none()
+    {
+        std::env::set_var("HOST", "127.0.0.1");
+    }
     if std::env::var("API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
