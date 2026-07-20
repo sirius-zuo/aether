@@ -89,9 +89,9 @@ MODEL_NAME=Qwen3.6-35B-A3B-GGUF \
 ./run.sh "Should we migrate our API from REST to gRPC?"
 ```
 
-`run.sh` exports the `MODEL_*` vars, launches the six `llm-planner-agent` processes on ports 9101–9106, waits for each `/health`, then runs the driver. Pass your own question as the first argument; omit it to use the default. On exit it kills the agent processes it spawned.
+`run.sh` exports the `MODEL_*` vars, launches the six `llm-planner-agent` processes on ports 9101–9106, waits for each `/health`, then runs the driver. Pass your own question as the first argument; omit it to use the default. On exit it kills the agent processes it spawned. (Requires bash ≥ 4 for its associative array — on macOS install a newer bash via Homebrew, since the system `/bin/bash` is 3.2.)
 
-The `assess_cost` agent gates a tool call for human approval, so the run **suspends** partway through; the driver auto-approves it and continues — you'll see `Node 'cost' suspended for approval — auto-approving.` on stderr.
+The `assess_cost` agent gates a tool call for human approval, so the run **suspends** partway through; the driver auto-approves it and continues — you'll see `Node 'cost' suspended for approval — auto-approving.` on stdout.
 
 Example output (abridged):
 

@@ -32,4 +32,4 @@ for port in "${ROLES[@]}"; do
   done
 done
 
-cargo run -q -p example-llm-planner -- "${1:-Should we migrate from REST to gRPC?}"
+cargo run -q -p example-llm-planner --bin llm-planner -- "${1:-Should we migrate from REST to gRPC?}"
