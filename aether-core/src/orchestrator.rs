@@ -153,7 +153,10 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     pub fn new(store: RegistryStore, execution_store: ExecutionStore) -> Self {
-        Self { store, execution_store }
+        Self {
+            store,
+            execution_store,
+        }
     }
 
     /// Submit a goal. Resolves the `"plan"` capability, asks that agent for a DAG,
@@ -265,7 +268,12 @@ impl Orchestrator {
                     error: format!("no such execution '{wid}'"),
                 }
             }
-            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
         };
         let dag = match serde_json::from_str::<serde_json::Value>(&record.workflow_spec)
             .map_err(|e| e.to_string())
@@ -281,7 +289,12 @@ impl Orchestrator {
         };
         let (registry, workflow) = match build_registry_and_workflow(&self.store, &dag).await {
             Ok(rw) => rw,
-            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
         };
         Supervisor::with_store(registry, self.execution_store.clone())
             .recover(&workflow, workflow_id)

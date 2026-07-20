@@ -244,7 +244,10 @@ mod tests {
             }]
         });
         let dag = DagSpec::parse(&json).unwrap();
-        assert_eq!(dag.nodes[0].metadata.get("url").unwrap(), "https://example.com");
+        assert_eq!(
+            dag.nodes[0].metadata.get("url").unwrap(),
+            "https://example.com"
+        );
         assert_eq!(dag.nodes[0].metadata.get("timeout_ms").unwrap(), "5000");
     }
 

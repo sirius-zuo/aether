@@ -42,7 +42,10 @@ pub async fn start(
         tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 match &event {
-                    SupervisorEvent::WorkflowStarted { workflow_id, entries } => {
+                    SupervisorEvent::WorkflowStarted {
+                        workflow_id,
+                        entries,
+                    } => {
                         let mut wfs = state_bg.active_workflows.lock().unwrap();
                         wfs.insert(
                             workflow_id.to_string(),

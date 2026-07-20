@@ -49,7 +49,9 @@ mod tests {
         let req = ResumeRequest {
             session_id: "s1".into(),
             approval_id: "a1".into(),
-            decision: ApprovalDecision::Rejected { reason: Some("no".into()) },
+            decision: ApprovalDecision::Rejected {
+                reason: Some("no".into()),
+            },
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["decision"]["type"], "rejected");

@@ -28,8 +28,8 @@ async fn main() {
     // recovery is operator-driven (Orchestrator::recoverable / recover) — this
     // binary never auto-recovers, so a crash leaves orphaned rows until an
     // operator inspects and recovers them.
-    let exec_db_path = std::env::var("AETHER_EXEC_DB_PATH")
-        .unwrap_or_else(|_| "aether-executions.db".to_string());
+    let exec_db_path =
+        std::env::var("AETHER_EXEC_DB_PATH").unwrap_or_else(|_| "aether-executions.db".to_string());
     let store = RegistryStore::open(&db_path).expect("open registry store");
     let execution_store =
         aether_core::ExecutionStore::open(&exec_db_path).expect("open execution store");
