@@ -155,9 +155,7 @@ fn detect_cycle(entries: &[String], edges: &[Edge]) -> Result<(), AetherError> {
     let mut rec_stack: HashSet<String> = HashSet::new();
 
     for entry in entries {
-        if !visited.contains(entry.as_str())
-            && dfs(entry, &adj, &mut visited, &mut rec_stack)
-        {
+        if !visited.contains(entry.as_str()) && dfs(entry, &adj, &mut visited, &mut rec_stack) {
             return Err(AetherError::WorkflowError {
                 message: "workflow graph contains a cycle".to_string(),
             });

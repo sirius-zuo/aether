@@ -85,8 +85,12 @@ impl RegistryStore {
     /// Test-only: open a fresh SQLite registry backed by a unique temp file.
     #[cfg(test)]
     pub(crate) fn open_temp() -> Self {
-        Self::open(crate::temp_db_path("aether-registry").to_str().expect("utf8 temp path"))
-            .expect("open temp registry store")
+        Self::open(
+            crate::temp_db_path("aether-registry")
+                .to_str()
+                .expect("utf8 temp path"),
+        )
+        .expect("open temp registry store")
     }
 
     pub async fn register(&self, entry: RegistrationEntry) -> Result<(), AetherError> {

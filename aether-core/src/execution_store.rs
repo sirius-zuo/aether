@@ -91,7 +91,9 @@ pub struct ExecutionStore {
 }
 
 fn store_err(e: impl ToString) -> AetherError {
-    AetherError::WorkflowError { message: e.to_string() }
+    AetherError::WorkflowError {
+        message: e.to_string(),
+    }
 }
 
 impl ExecutionStore {
@@ -125,7 +127,9 @@ impl ExecutionStore {
             );",
         )
         .map_err(store_err)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Test-only: open a fresh SQLite store backed by a unique temp file.
@@ -133,8 +137,12 @@ impl ExecutionStore {
     /// exercise a true restart.
     #[cfg(test)]
     pub(crate) fn open_temp() -> Self {
-        Self::open(crate::temp_db_path("aether-exec").to_str().expect("utf8 temp path"))
-            .expect("open temp execution store")
+        Self::open(
+            crate::temp_db_path("aether-exec")
+                .to_str()
+                .expect("utf8 temp path"),
+        )
+        .expect("open temp execution store")
     }
 
     pub async fn create_execution(
@@ -277,7 +285,8 @@ impl ExecutionStore {
             let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
             let params: Vec<&dyn rusqlite::ToSql> =
                 args.iter().map(|a| a as &dyn rusqlite::ToSql).collect();
-            conn.execute(sql, params.as_slice()).map_err(|e| e.to_string())
+            conn.execute(sql, params.as_slice())
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(store_err)?
@@ -285,7 +294,11 @@ impl ExecutionStore {
         Ok(())
     }
 
-    pub async fn mark_node_running(&self, workflow_id: &str, node_id: &str) -> Result<(), AetherError> {
+    pub async fn mark_node_running(
+        &self,
+        workflow_id: &str,
+        node_id: &str,
+    ) -> Result<(), AetherError> {
         let now = chrono::Utc::now().to_rfc3339();
         self.exec_write(
             "UPDATE execution_nodes SET status='running', updated_at=?3
@@ -307,7 +320,12 @@ impl ExecutionStore {
              SET status='done', output=?3, session_id=NULL, approval_id=NULL,
                  kind=NULL, prompt=NULL, gate_deadline=NULL, updated_at=?4
              WHERE workflow_id=?1 AND node_id=?2",
-            vec![Some(workflow_id.into()), Some(node_id.into()), Some(output_json.into()), Some(now)],
+            vec![
+                Some(workflow_id.into()),
+                Some(node_id.into()),
+                Some(output_json.into()),
+                Some(now),
+            ],
         )
         .await
     }
@@ -365,7 +383,10 @@ impl ExecutionStore {
         .await
     }
 
-    pub async fn expire_gates(&self, now_rfc3339: &str) -> Result<Vec<(String, String)>, AetherError> {
+    pub async fn expire_gates(
+        &self,
+        now_rfc3339: &str,
+    ) -> Result<Vec<(String, String)>, AetherError> {
         let conn = Arc::clone(&self.conn);
         let now = now_rfc3339.to_string();
         tokio::task::spawn_blocking(move || {
@@ -417,7 +438,10 @@ mod tests {
         let p = path.to_str().unwrap();
         {
             let store = ExecutionStore::open(p).unwrap();
-            store.create_execution("wf", "{}", "{}", &["a".into(), "b".into()]).await.unwrap();
+            store
+                .create_execution("wf", "{}", "{}", &["a".into(), "b".into()])
+                .await
+                .unwrap();
             store.complete_node("wf", "a", r#"{"v":1}"#).await.unwrap();
         } // store dropped -> connection closed, simulating a restart
 
@@ -469,7 +493,10 @@ mod tests {
     #[tokio::test]
     async fn complete_node_sets_done_and_output() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        store
+            .create_execution("wf", "{}", "{}", &["a".into()])
+            .await
+            .unwrap();
         store.mark_node_running("wf", "a").await.unwrap();
         store.complete_node("wf", "a", r#"{"x":1}"#).await.unwrap();
 
@@ -482,8 +509,14 @@ mod tests {
     #[tokio::test]
     async fn park_node_records_correlation() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
-        store.park_node("wf", "a", "s1", "ap1", "phase_gate", "Sign off?", None).await.unwrap();
+        store
+            .create_execution("wf", "{}", "{}", &["a".into()])
+            .await
+            .unwrap();
+        store
+            .park_node("wf", "a", "s1", "ap1", "phase_gate", "Sign off?", None)
+            .await
+            .unwrap();
 
         let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
         let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
@@ -496,9 +529,26 @@ mod tests {
     #[tokio::test]
     async fn complete_node_clears_correlation_after_resume() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
-        store.park_node("wf", "a", "s1", "ap1", "tool_approval", "ok?", Some("2026-01-01T00:00:00+00:00")).await.unwrap();
-        store.complete_node("wf", "a", r#"{"done":true}"#).await.unwrap();
+        store
+            .create_execution("wf", "{}", "{}", &["a".into()])
+            .await
+            .unwrap();
+        store
+            .park_node(
+                "wf",
+                "a",
+                "s1",
+                "ap1",
+                "tool_approval",
+                "ok?",
+                Some("2026-01-01T00:00:00+00:00"),
+            )
+            .await
+            .unwrap();
+        store
+            .complete_node("wf", "a", r#"{"done":true}"#)
+            .await
+            .unwrap();
 
         let (_e, nodes) = store.load_execution("wf").await.unwrap().unwrap();
         let a = nodes.iter().find(|n| n.node_id == "a").unwrap();
@@ -513,8 +563,14 @@ mod tests {
     #[tokio::test]
     async fn finish_execution_sets_status_and_result() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
-        store.finish_execution("wf", ExecutionStatus::Succeeded, Some(r#"{"r":1}"#), None).await.unwrap();
+        store
+            .create_execution("wf", "{}", "{}", &["a".into()])
+            .await
+            .unwrap();
+        store
+            .finish_execution("wf", ExecutionStatus::Succeeded, Some(r#"{"r":1}"#), None)
+            .await
+            .unwrap();
 
         let (exec, _n) = store.load_execution("wf").await.unwrap().unwrap();
         assert_eq!(exec.status, ExecutionStatus::Succeeded);
@@ -524,13 +580,27 @@ mod tests {
     #[tokio::test]
     async fn expire_gates_fails_past_deadline_nodes() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
         store
-            .park_node("wf", "a", "s1", "a1", "phase_gate", "ok?", Some("2000-01-01T00:00:00+00:00"))
+            .create_execution("wf", "{}", "{}", &["a".into()])
+            .await
+            .unwrap();
+        store
+            .park_node(
+                "wf",
+                "a",
+                "s1",
+                "a1",
+                "phase_gate",
+                "ok?",
+                Some("2000-01-01T00:00:00+00:00"),
+            )
             .await
             .unwrap();
 
-        let expired = store.expire_gates("2030-01-01T00:00:00+00:00").await.unwrap();
+        let expired = store
+            .expire_gates("2030-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
         assert_eq!(expired, vec![("wf".to_string(), "a".to_string())]);
 
         let (exec, nodes) = store.load_execution("wf").await.unwrap().unwrap();
@@ -541,13 +611,30 @@ mod tests {
     #[tokio::test]
     async fn expire_gates_ignores_future_and_null_deadlines() {
         let store = ExecutionStore::open_temp();
-        store.create_execution("wf", "{}", "{}", &["a".into(), "b".into()]).await.unwrap();
-        store.park_node("wf", "a", "s", "x", "k", "p", None).await.unwrap();
         store
-            .park_node("wf", "b", "s", "y", "k", "p", Some("2030-01-01T00:00:00+00:00"))
+            .create_execution("wf", "{}", "{}", &["a".into(), "b".into()])
             .await
             .unwrap();
-        let expired = store.expire_gates("2020-01-01T00:00:00+00:00").await.unwrap();
+        store
+            .park_node("wf", "a", "s", "x", "k", "p", None)
+            .await
+            .unwrap();
+        store
+            .park_node(
+                "wf",
+                "b",
+                "s",
+                "y",
+                "k",
+                "p",
+                Some("2030-01-01T00:00:00+00:00"),
+            )
+            .await
+            .unwrap();
+        let expired = store
+            .expire_gates("2020-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
         assert!(expired.is_empty());
     }
 }

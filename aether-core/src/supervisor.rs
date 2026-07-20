@@ -91,7 +91,8 @@ impl Supervisor {
     }
 
     pub async fn run(&self, workflow: &Workflow, initial_payload: serde_json::Value) -> Outcome {
-        self.run_with_id(Uuid::new_v4(), workflow, initial_payload).await
+        self.run_with_id(Uuid::new_v4(), workflow, initial_payload)
+            .await
     }
 
     /// Like [`run`], but with a caller-supplied `workflow_id` so the id can be
@@ -104,7 +105,8 @@ impl Supervisor {
         initial_payload: serde_json::Value,
     ) -> Outcome {
         let spec = serialize_workflow_spec(workflow);
-        self.run_with_id_spec(workflow_id, workflow, initial_payload, spec).await
+        self.run_with_id_spec(workflow_id, workflow, initial_payload, spec)
+            .await
     }
 
     /// Like [`run_with_id`], but persists a caller-supplied `workflow_spec`
@@ -136,7 +138,10 @@ impl Supervisor {
             )
             .await
         {
-            return Outcome::Failed { node: String::new(), error: e.to_string() };
+            return Outcome::Failed {
+                node: String::new(),
+                error: e.to_string(),
+            };
         }
 
         let ready: Vec<(String, serde_json::Value)> = workflow
@@ -147,7 +152,10 @@ impl Supervisor {
 
         let outcome = match self.drive(workflow, workflow_id, ready).await {
             Ok(o) => o,
-            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => Outcome::Failed {
+                node: String::new(),
+                error: e.to_string(),
+            },
         };
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
@@ -207,7 +215,12 @@ impl Supervisor {
 
                     let start = Instant::now();
                     let response = dispatch_with_failure_policy(
-                        &sup_im, &node, envelope, &sup_registry, workflow_id, &sup_event,
+                        &sup_im,
+                        &node,
+                        envelope,
+                        &sup_registry,
+                        workflow_id,
+                        &sup_event,
                     )
                     .await?;
                     let elapsed = start.elapsed();
@@ -236,24 +249,37 @@ impl Supervisor {
                         return self.fail_execution(&wid, &e).await;
                     }
                     Err(join_err) => {
-                        let e = AetherError::WorkflowError { message: join_err.to_string() };
+                        let e = AetherError::WorkflowError {
+                            message: join_err.to_string(),
+                        };
                         return self.fail_execution(&wid, &e).await;
                     }
                 };
 
                 if response.kind == EnvelopeKind::Suspended {
-                    let sp: crate::SuspendPayload = match serde_json::from_value(response.payload.clone()) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let we = AetherError::WorkflowError {
-                                message: format!("malformed Suspended payload from '{node_name}': {e}"),
-                            };
-                            return self.fail_execution(&wid, &we).await;
-                        }
-                    };
+                    let sp: crate::SuspendPayload =
+                        match serde_json::from_value(response.payload.clone()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let we = AetherError::WorkflowError {
+                                    message: format!(
+                                        "malformed Suspended payload from '{node_name}': {e}"
+                                    ),
+                                };
+                                return self.fail_execution(&wid, &we).await;
+                            }
+                        };
                     if let Err(e) = self
                         .store
-                        .park_node(&wid, &node_name, &sp.session_id, &sp.approval_id, &sp.kind, &sp.prompt, None)
+                        .park_node(
+                            &wid,
+                            &node_name,
+                            &sp.session_id,
+                            &sp.approval_id,
+                            &sp.kind,
+                            &sp.prompt,
+                            None,
+                        )
                         .await
                     {
                         return self.fail_execution(&wid, &e).await;
@@ -301,26 +327,42 @@ impl Supervisor {
         wid: &str,
         to: &str,
     ) -> Result<Option<serde_json::Value>, AetherError> {
-        let (_exec, nodes) = self
-            .store
-            .load_execution(wid)
-            .await?
-            .ok_or_else(|| AetherError::WorkflowError { message: "execution vanished".into() })?;
-        let status = |id: &str| nodes.iter().find(|n| n.node_id == id).map(|n| n.status.clone());
+        let (_exec, nodes) =
+            self.store
+                .load_execution(wid)
+                .await?
+                .ok_or_else(|| AetherError::WorkflowError {
+                    message: "execution vanished".into(),
+                })?;
+        let status = |id: &str| {
+            nodes
+                .iter()
+                .find(|n| n.node_id == id)
+                .map(|n| n.status.clone())
+        };
         let output = |id: &str| {
             nodes
                 .iter()
                 .find(|n| n.node_id == id)
                 .and_then(|n| n.output.as_ref())
-                .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null))
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
+                })
                 .unwrap_or(serde_json::Value::Null)
         };
 
         if status(to) != Some(crate::NodeStatus::Pending) {
             return Ok(None);
         }
-        let deps: Vec<String> = workflow.incoming(to).iter().map(|e| e.from.clone()).collect();
-        if !deps.iter().all(|d| status(d) == Some(crate::NodeStatus::Done)) {
+        let deps: Vec<String> = workflow
+            .incoming(to)
+            .iter()
+            .map(|e| e.from.clone())
+            .collect();
+        if !deps
+            .iter()
+            .all(|d| status(d) == Some(crate::NodeStatus::Done))
+        {
             return Ok(None);
         }
         let input = if deps.len() == 1 {
@@ -334,15 +376,24 @@ impl Supervisor {
     }
 
     /// Called when `ready` drains: succeed if nothing is parked, else suspend.
-    async fn finalize(&self, workflow: &Workflow, workflow_id: Uuid) -> Result<Outcome, AetherError> {
+    async fn finalize(
+        &self,
+        workflow: &Workflow,
+        workflow_id: Uuid,
+    ) -> Result<Outcome, AetherError> {
         let wid = workflow_id.to_string();
-        let (_exec, nodes) = self
-            .store
-            .load_execution(&wid)
-            .await?
-            .ok_or_else(|| AetherError::WorkflowError { message: "execution vanished".into() })?;
+        let (_exec, nodes) =
+            self.store
+                .load_execution(&wid)
+                .await?
+                .ok_or_else(|| AetherError::WorkflowError {
+                    message: "execution vanished".into(),
+                })?;
 
-        if nodes.iter().any(|n| n.status == crate::NodeStatus::Suspended) {
+        if nodes
+            .iter()
+            .any(|n| n.status == crate::NodeStatus::Suspended)
+        {
             self.store
                 .finish_execution(&wid, crate::ExecutionStatus::Suspended, None, None)
                 .await?;
@@ -359,14 +410,20 @@ impl Supervisor {
                 n.output.as_ref().map(|s| {
                     (
                         n.node_id.clone(),
-                        serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null),
+                        serde_json::from_str::<serde_json::Value>(s)
+                            .unwrap_or(serde_json::Value::Null),
                     )
                 })
             })
             .collect();
         let result = serde_json::Value::Object(terminal);
         self.store
-            .finish_execution(&wid, crate::ExecutionStatus::Succeeded, Some(&result.to_string()), None)
+            .finish_execution(
+                &wid,
+                crate::ExecutionStatus::Succeeded,
+                Some(&result.to_string()),
+                None,
+            )
             .await?;
         Ok(Outcome::Success(result))
     }
@@ -384,30 +441,60 @@ impl Supervisor {
         let node_rec = match self.store.load_execution(&wid).await {
             Ok(Some((_e, nodes))) => nodes.into_iter().find(|n| n.node_id == node_id),
             Ok(None) => None,
-            Err(e) => return Outcome::Failed { node: node_id.into(), error: e.to_string() },
+            Err(e) => {
+                return Outcome::Failed {
+                    node: node_id.into(),
+                    error: e.to_string(),
+                }
+            }
         };
         let Some(node_rec) = node_rec else {
-            return Outcome::Failed { node: node_id.into(), error: "unknown node".into() };
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: "unknown node".into(),
+            };
         };
         if node_rec.status != crate::NodeStatus::Suspended {
-            return Outcome::Failed { node: node_id.into(), error: "node is not suspended".into() };
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: "node is not suspended".into(),
+            };
         }
-        let (Some(session_id), Some(approval_id)) = (node_rec.session_id, node_rec.approval_id) else {
-            return Outcome::Failed { node: node_id.into(), error: "missing resume correlation".into() };
+        let (Some(session_id), Some(approval_id)) = (node_rec.session_id, node_rec.approval_id)
+        else {
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: "missing resume correlation".into(),
+            };
         };
         let Some(node) = self.registry.get(node_id) else {
-            return Outcome::Failed { node: node_id.into(), error: "node not in registry".into() };
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: "node not in registry".into(),
+            };
         };
 
-        let req = crate::ResumeRequest { session_id, approval_id, decision };
+        let req = crate::ResumeRequest {
+            session_id,
+            approval_id,
+            decision,
+        };
         let response = match self.instance_manager.resume(&node, req).await {
             Ok(env) => env,
             Err(e) => {
                 let _ = self
                     .store
-                    .finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string()))
+                    .finish_execution(
+                        &wid,
+                        crate::ExecutionStatus::Failed,
+                        None,
+                        Some(&e.to_string()),
+                    )
                     .await;
-                return Outcome::Failed { node: node_id.into(), error: e.to_string() };
+                return Outcome::Failed {
+                    node: node_id.into(),
+                    error: e.to_string(),
+                };
             }
         };
 
@@ -415,11 +502,24 @@ impl Supervisor {
         if response.kind == EnvelopeKind::Suspended {
             let sp: crate::SuspendPayload = match serde_json::from_value(response.payload.clone()) {
                 Ok(v) => v,
-                Err(e) => return Outcome::Failed { node: node_id.into(), error: e.to_string() },
+                Err(e) => {
+                    return Outcome::Failed {
+                        node: node_id.into(),
+                        error: e.to_string(),
+                    }
+                }
             };
             let _ = self
                 .store
-                .park_node(&wid, node_id, &sp.session_id, &sp.approval_id, &sp.kind, &sp.prompt, None)
+                .park_node(
+                    &wid,
+                    node_id,
+                    &sp.session_id,
+                    &sp.approval_id,
+                    &sp.kind,
+                    &sp.prompt,
+                    None,
+                )
                 .await;
             let _ = self.event_tx.send(SupervisorEvent::NodeSuspended {
                 workflow_id,
@@ -441,13 +541,31 @@ impl Supervisor {
                 .store
                 .finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&err))
                 .await;
-            return Outcome::Failed { node: node_id.into(), error: err };
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: err,
+            };
         }
 
         // Completed: checkpoint and expand downstream, then continue the loop.
-        if let Err(e) = self.store.complete_node(&wid, node_id, &response.payload.to_string()).await {
-            let _ = self.store.finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string())).await;
-            return Outcome::Failed { node: node_id.into(), error: e.to_string() };
+        if let Err(e) = self
+            .store
+            .complete_node(&wid, node_id, &response.payload.to_string())
+            .await
+        {
+            let _ = self
+                .store
+                .finish_execution(
+                    &wid,
+                    crate::ExecutionStatus::Failed,
+                    None,
+                    Some(&e.to_string()),
+                )
+                .await;
+            return Outcome::Failed {
+                node: node_id.into(),
+                error: e.to_string(),
+            };
         }
         // Reactivate the execution row so finalize can succeed it.
         let _ = self
@@ -462,8 +580,19 @@ impl Supervisor {
                     Ok(Some(input)) => ready.push((edge.to.clone(), input)),
                     Ok(None) => {}
                     Err(e) => {
-                        let _ = self.store.finish_execution(&wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string())).await;
-                        return Outcome::Failed { node: edge.to.clone(), error: e.to_string() };
+                        let _ = self
+                            .store
+                            .finish_execution(
+                                &wid,
+                                crate::ExecutionStatus::Failed,
+                                None,
+                                Some(&e.to_string()),
+                            )
+                            .await;
+                        return Outcome::Failed {
+                            node: edge.to.clone(),
+                            error: e.to_string(),
+                        };
                     }
                 }
             }
@@ -471,7 +600,10 @@ impl Supervisor {
 
         let outcome = match self.drive(workflow, workflow_id, ready).await {
             Ok(o) => o,
-            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => Outcome::Failed {
+                node: String::new(),
+                error: e.to_string(),
+            },
         };
         let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
             workflow_id,
@@ -496,17 +628,34 @@ impl Supervisor {
         let wid = workflow_id.to_string();
         let (exec, nodes) = match self.store.load_execution(&wid).await {
             Ok(Some(v)) => v,
-            Ok(None) => return Outcome::Failed { node: String::new(), error: "no such execution".into() },
-            Err(e) => return Outcome::Failed { node: String::new(), error: e.to_string() },
+            Ok(None) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: "no such execution".into(),
+                }
+            }
+            Err(e) => {
+                return Outcome::Failed {
+                    node: String::new(),
+                    error: e.to_string(),
+                }
+            }
         };
 
-        let status = |id: &str| nodes.iter().find(|n| n.node_id == id).map(|n| n.status.clone());
+        let status = |id: &str| {
+            nodes
+                .iter()
+                .find(|n| n.node_id == id)
+                .map(|n| n.status.clone())
+        };
         let output = |id: &str| {
             nodes
                 .iter()
                 .find(|n| n.node_id == id)
                 .and_then(|n| n.output.as_ref())
-                .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null))
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
+                })
                 .unwrap_or(serde_json::Value::Null)
         };
         let initial_payload: serde_json::Value =
@@ -517,8 +666,15 @@ impl Supervisor {
             if n.status != crate::NodeStatus::Pending && n.status != crate::NodeStatus::Running {
                 continue;
             }
-            let deps: Vec<String> = workflow.incoming(&n.node_id).iter().map(|e| e.from.clone()).collect();
-            if !deps.iter().all(|d| status(d) == Some(crate::NodeStatus::Done)) {
+            let deps: Vec<String> = workflow
+                .incoming(&n.node_id)
+                .iter()
+                .map(|e| e.from.clone())
+                .collect();
+            if !deps
+                .iter()
+                .all(|d| status(d) == Some(crate::NodeStatus::Done))
+            {
                 continue;
             }
             let input = if deps.is_empty() {
@@ -541,7 +697,10 @@ impl Supervisor {
 
         let outcome = match self.drive(workflow, workflow_id, ready).await {
             Ok(o) => o,
-            Err(e) => Outcome::Failed { node: String::new(), error: e.to_string() },
+            Err(e) => Outcome::Failed {
+                node: String::new(),
+                error: e.to_string(),
+            },
         };
         let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
             workflow_id,
@@ -555,7 +714,12 @@ impl Supervisor {
             AetherError::AgentTimeout { node } => {
                 let _ = self
                     .store
-                    .finish_execution(wid, crate::ExecutionStatus::Failed, None, Some(&e.to_string()))
+                    .finish_execution(
+                        wid,
+                        crate::ExecutionStatus::Failed,
+                        None,
+                        Some(&e.to_string()),
+                    )
                     .await;
                 return Ok(Outcome::Timeout { node: node.clone() });
             }
@@ -740,7 +904,10 @@ mod tests {
         let outcome = sup.run(&wf, serde_json::json!("start")).await;
         if let Outcome::Success(v) = outcome {
             // "merge" is the single terminal, receives named map from left+right
-            assert!(v["merge"].is_object(), "fan-in result should be a named map");
+            assert!(
+                v["merge"].is_object(),
+                "fan-in result should be a named map"
+            );
             assert_eq!(v["merge"]["left"], "start");
             assert_eq!(v["merge"]["right"], "start");
         } else {
@@ -808,7 +975,10 @@ mod tests {
             Outcome::Success(v) => {
                 // "worker" is the single terminal → v = { "worker": { "instruction": …, "node": … } }
                 assert_eq!(v["worker"]["instruction"], "do-the-thing");
-                assert!(v["worker"].get("node").is_some(), "reserved keys still present");
+                assert!(
+                    v["worker"].get("node").is_some(),
+                    "reserved keys still present"
+                );
             }
             other => panic!("expected Success, got {:?}", other),
         }
@@ -829,7 +999,10 @@ mod tests {
         if let Outcome::Success(v) = outcome {
             // "merge" is the single terminal → v = { "merge": { "left": "start", "right": "start" } }
             let merge_result = &v["merge"];
-            assert!(merge_result.is_object(), "fan-in must deliver a named map, got: {merge_result}");
+            assert!(
+                merge_result.is_object(),
+                "fan-in must deliver a named map, got: {merge_result}"
+            );
             assert!(merge_result.get("left").is_some(), "missing 'left' key");
             assert!(merge_result.get("right").is_some(), "missing 'right' key");
         } else {
@@ -965,7 +1138,11 @@ mod tests {
         let outcome = sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
 
         assert!(matches!(outcome, Outcome::Suspended { .. }));
-        let (exec, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        let (exec, nodes) = store
+            .load_execution(&wid.to_string())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(exec.status, crate::ExecutionStatus::Suspended);
         let gate = nodes.iter().find(|n| n.node_id == "gate").unwrap();
         let after = nodes.iter().find(|n| n.node_id == "after").unwrap();
@@ -988,7 +1165,10 @@ mod tests {
                     ..msg
                 })
             }
-            async fn resume(&self, _r: crate::resume::ResumeRequest) -> Result<Envelope, AetherError> {
+            async fn resume(
+                &self,
+                _r: crate::resume::ResumeRequest,
+            ) -> Result<Envelope, AetherError> {
                 Ok(Envelope {
                     id: Uuid::new_v4(),
                     kind: EnvelopeKind::Result,
@@ -1048,7 +1228,10 @@ mod tests {
                 if self.0 == "a" {
                     A_CALLS.fetch_add(1, Ordering::SeqCst);
                 }
-                Ok(Envelope { kind: EnvelopeKind::Result, ..msg })
+                Ok(Envelope {
+                    kind: EnvelopeKind::Result,
+                    ..msg
+                })
             }
             async fn shutdown(&self, _: Duration) {}
         }
@@ -1080,20 +1263,34 @@ mod tests {
         let store = crate::ExecutionStore::open_temp();
         let wid = Uuid::new_v4();
         // Simulate a crash after "a" completed but before "b" ran.
-        let wf = Workflow::builder(&build_registry()).edge("a", "b").build().unwrap();
+        let wf = Workflow::builder(&build_registry())
+            .edge("a", "b")
+            .build()
+            .unwrap();
         store
             .create_execution(&wid.to_string(), "{}", "{}", &["a".into(), "b".into()])
             .await
             .unwrap();
-        store.complete_node(&wid.to_string(), "a", r#"{"v":1}"#).await.unwrap();
+        store
+            .complete_node(&wid.to_string(), "a", r#"{"v":1}"#)
+            .await
+            .unwrap();
 
         A_CALLS.store(0, Ordering::SeqCst);
         let sup = Supervisor::with_store(build_registry(), store.clone());
         let outcome = sup.recover(&wf, wid).await;
 
         assert!(matches!(outcome, Outcome::Success(_)));
-        assert_eq!(A_CALLS.load(Ordering::SeqCst), 0, "done node 'a' must not be re-run");
-        let (exec, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        assert_eq!(
+            A_CALLS.load(Ordering::SeqCst),
+            0,
+            "done node 'a' must not be re-run"
+        );
+        let (exec, nodes) = store
+            .load_execution(&wid.to_string())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(exec.status, crate::ExecutionStatus::Succeeded);
         assert!(nodes.iter().find(|n| n.node_id == "b").unwrap().status == crate::NodeStatus::Done);
     }

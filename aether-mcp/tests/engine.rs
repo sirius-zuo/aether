@@ -11,7 +11,9 @@ fn temp_db(prefix: &str) -> String {
     let n = C.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
         .join(format!("{prefix}-{}-{n}.db", std::process::id()))
-        .to_str().unwrap().to_string()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 #[tokio::test]

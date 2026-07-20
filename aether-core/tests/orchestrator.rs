@@ -1,5 +1,6 @@
 use aether_core::orchestrator::Orchestrator;
 use aether_core::registry_store::{RegistrationEntry, RegistryStatus, RegistryStore};
+use aether_core::ExecutionStore;
 use aether_core::{Envelope, EnvelopeKind, Outcome};
 use axum::{
     extract::Json,
@@ -7,7 +8,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use aether_core::ExecutionStore;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
 
@@ -18,10 +18,16 @@ fn temp_db(prefix: &str) -> String {
     let n = C.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
         .join(format!("{prefix}-{}-{n}.db", std::process::id()))
-        .to_str().unwrap().to_string()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
-fn temp_registry() -> RegistryStore { RegistryStore::open(&temp_db("aether-it-reg")).unwrap() }
-fn temp_exec() -> ExecutionStore { ExecutionStore::open(&temp_db("aether-it-exec")).unwrap() }
+fn temp_registry() -> RegistryStore {
+    RegistryStore::open(&temp_db("aether-it-reg")).unwrap()
+}
+fn temp_exec() -> ExecutionStore {
+    ExecutionStore::open(&temp_db("aether-it-exec")).unwrap()
+}
 
 /// Echo worker: speaks the built-in-server contract — reads `payload.input`
 /// and returns `{"output": <that>}`.
@@ -217,9 +223,17 @@ async fn recover_by_id_redrives_active_execution_after_reopen() {
     // Seed: a done, b pending — as if aether crashed after a completed.
     {
         let exec = ExecutionStore::open(&exec_path).unwrap();
-        exec.create_execution(&wid.to_string(), &dag.to_string(), "null",
-            &["a".to_string(), "b".to_string()]).await.unwrap();
-        exec.complete_node(&wid.to_string(), "a", r#"{"v":1}"#).await.unwrap();
+        exec.create_execution(
+            &wid.to_string(),
+            &dag.to_string(),
+            "null",
+            &["a".to_string(), "b".to_string()],
+        )
+        .await
+        .unwrap();
+        exec.complete_node(&wid.to_string(), "a", r#"{"v":1}"#)
+            .await
+            .unwrap();
     } // dropped: simulate restart
 
     let exec = ExecutionStore::open(&exec_path).unwrap();
@@ -234,10 +248,15 @@ async fn recover_by_id_redrives_active_execution_after_reopen() {
     let outcome = orch.recover(wid).await;
     assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
 
-    let (record, nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    let (record, nodes) = exec
+        .load_execution(&wid.to_string())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
-    assert!(nodes.iter().find(|n| n.node_id == "b").unwrap().status
-        == aether_core::NodeStatus::Done);
+    assert!(
+        nodes.iter().find(|n| n.node_id == "b").unwrap().status == aether_core::NodeStatus::Done
+    );
 }
 
 #[tokio::test]
@@ -255,11 +274,17 @@ async fn submit_persists_dag_in_shared_store() {
     let exec = temp_exec();
     let orch = Orchestrator::new(reg, exec.clone());
     let wid = uuid::Uuid::new_v4();
-    let outcome = orch.submit_with_id(wid, serde_json::json!({"goal": "x"})).await;
+    let outcome = orch
+        .submit_with_id(wid, serde_json::json!({"goal": "x"}))
+        .await;
     assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
 
     // The shared store still holds the run, and the spec parses back to a DAG.
-    let (record, _nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    let (record, _nodes) = exec
+        .load_execution(&wid.to_string())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
     let v: serde_json::Value = serde_json::from_str(&record.workflow_spec).unwrap();
     let parsed = aether_core::DagSpec::parse(&v).unwrap();
@@ -298,7 +323,11 @@ async fn resume_execution_approves_parked_node_and_completes() {
 
     // Operator approves; the run drives to completion via /aether/resume.
     let resumed = orch
-        .resume_execution(wid, node.as_deref().unwrap(), aether_core::ApprovalDecision::Approved)
+        .resume_execution(
+            wid,
+            node.as_deref().unwrap(),
+            aether_core::ApprovalDecision::Approved,
+        )
         .await;
     match resumed {
         Outcome::Success(v) => assert_eq!(v["gate"]["output"], "resumed-ok"),
@@ -306,11 +335,14 @@ async fn resume_execution_approves_parked_node_and_completes() {
     }
 
     // Durable store reflects completion.
-    let (record, nodes) = exec.load_execution(&wid.to_string()).await.unwrap().unwrap();
+    let (record, nodes) = exec
+        .load_execution(&wid.to_string())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(record.status, aether_core::ExecutionStatus::Succeeded);
     assert!(
-        nodes.iter().find(|n| n.node_id == "gate").unwrap().status
-            == aether_core::NodeStatus::Done
+        nodes.iter().find(|n| n.node_id == "gate").unwrap().status == aether_core::NodeStatus::Done
     );
 
     // Nothing is parked anymore.
@@ -332,11 +364,16 @@ async fn suspended_node_returns_none_for_completed_and_unknown() {
     let exec = temp_exec();
     let orch = Orchestrator::new(reg, exec.clone());
     let wid = uuid::Uuid::new_v4();
-    let outcome = orch.submit_with_id(wid, serde_json::json!({ "input": "x" })).await;
+    let outcome = orch
+        .submit_with_id(wid, serde_json::json!({ "input": "x" }))
+        .await;
     assert!(matches!(outcome, Outcome::Success(_)), "got {outcome:?}");
 
     // A completed run has no suspended node.
     assert_eq!(orch.suspended_node(wid).await.unwrap(), None);
     // An unknown id is not an error — just None.
-    assert_eq!(orch.suspended_node(uuid::Uuid::new_v4()).await.unwrap(), None);
+    assert_eq!(
+        orch.suspended_node(uuid::Uuid::new_v4()).await.unwrap(),
+        None
+    );
 }
