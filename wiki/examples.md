@@ -245,11 +245,11 @@ Newest first.
   proves the durable suspend/resume loop end-to-end" — the hand-rolled
   server had no `/aether/resume` route, so it could not demonstrate
   suspend/resume at all.
-- **Alternatives rejected:** commit `ac59813`'s message notes the built-in
-  server "reads a single `HOST`/`PORT` from env and so cannot host six
-  agents on six ports within one process" — the original design doc's own
-  reason for choosing hand-rolled servers; the rebase resolves that by
-  giving each role its own process instead.
+- **Alternatives rejected:** the llm-planner-example design doc (untracked)
+  records that the built-in server "reads a single `HOST`/`PORT` from env
+  and so cannot host six agents on six ports within one process" — the
+  original design doc's own reason for choosing hand-rolled servers; the
+  rebase resolves that by giving each role its own process instead.
 - **Consequences:** running the example now requires launching six
   processes (`run.sh` does this) instead of one; the driver (`main.rs`) no
   longer builds any `Agent`, only a `RegistryStore` pointed at the six
