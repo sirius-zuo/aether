@@ -209,12 +209,10 @@ MCP server).**
 - **Decision:** A node with 2+ dependencies receives a JSON object keyed by
   upstream node id instead of a positional array; `Outcome::Success` carries a
   map of every terminal node's output instead of one `Value`.
-- **Context:** The original design (`docs/superpowers/specs/2026-05-17-aether-design.md`,
-  untracked) specified fan-in as a positional array ordered by edge declaration
-  and a single required terminal node with one result. The DAG schema design
-  (`docs/superpowers/plans/2026-06-24-dag-schema-structured-output.md`, untracked)
-  needed to lift the single-entry/single-terminal restriction to cover more
-  workflow topologies.
+- **Context:** The aether design doc (untracked) specified fan-in as a positional
+  array ordered by edge declaration and a single required terminal node with one
+  result. The DAG-schema implementation plan (untracked) needed to lift the
+  single-entry/single-terminal restriction to cover more workflow topologies.
 - **Alternatives rejected:** Positional array fan-in was rejected because it
   requires downstream agents to index by declaration order, which breaks once a
   DAG can have an arbitrary number of dependents; the PR #1 code-review fix that
@@ -233,8 +231,8 @@ MCP server).**
   `depends_on`, and capability-or-agent per node; `DagNode` gains a
   `metadata: HashMap<String, String>` bag; `DagSpec::json_schema()` derives a
   JSON Schema via `schemars` for constrained planner output.
-- **Context:** `docs/superpowers/specs/2026-06-24-dag-schema-design.md`
-  (untracked) states the schema was "too restrictive (single entry, single
+- **Context:** The DAG-schema design doc (untracked) states the schema was
+  "too restrictive (single entry, single
   terminal, no per-node metadata) to cover the most useful workflow topologies,"
   and separately that "the planner LLM must always emit a `DagSpec`-valid JSON
   object" since "free-text output with best-effort parsing is insufficient for
@@ -253,7 +251,7 @@ MCP server).**
 - **Decision:** `AgentRegistry` holds `AgentNode` definitions only; live
   transports and process lifecycle are owned separately by `InstanceManager`,
   which `Supervisor` holds and coordinates.
-- **Context:** `docs/superpowers/specs/2026-05-17-aether-design.md` (untracked)
+- **Context:** The aether design doc (untracked)
   states "AgentNode is a definition, not a live instance. The Supervisor
   manages live transports separately via InstanceManager," and specifies that
   "names are validated at `Workflow::build()` time — unknown names are caught
