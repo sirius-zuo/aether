@@ -28,7 +28,8 @@ turn stays separate from how bytes reach an agent process (transport).
   `SupervisorEvent`), [MCP Server](mcp-server.md) (calls `Orchestrator::submit`
   and friends), [Examples](examples.md) (`aether-core/src/bin/aether.rs` runs the
   registry server that `Orchestrator` bridges into; `aether-core/src/bin/echo_agent.rs`
-  is a reference AgentVerse-side agent used in end-to-end examples).
+  is a test/reference agent that echoes every `Invoke` as `Result`, used for
+  manual end-to-end debugging rather than any automated example).
 
 ## Architecture
 
@@ -232,15 +233,16 @@ MCP server).**
   `depends_on`, and capability-or-agent per node; `DagNode` gains a
   `metadata: HashMap<String, String>` bag; `DagSpec::json_schema()` derives a
   JSON Schema via `schemars` for constrained planner output.
-- **Context:** `docs/superpowers/plans/2026-06-24-dag-schema-structured-output.md`
+- **Context:** `docs/superpowers/specs/2026-06-24-dag-schema-design.md`
   (untracked) states the schema was "too restrictive (single entry, single
   terminal, no per-node metadata) to cover the most useful workflow topologies,"
-  and that the planner LLM needed a JSON Schema to constrain its output instead
-  of relying on best-effort text parsing.
+  and separately that "the planner LLM must always emit a `DagSpec`-valid JSON
+  object" since "free-text output with best-effort parsing is insufficient for
+  production."
 - **Alternatives rejected:** Keeping single-entry/single-terminal validation was
-  rejected as the doc's explicit "removed constraints" list; free-text planner
-  output with parse-only validation was rejected in favor of `json_schema()`
-  feeding a provider's structured-output mode.
+  rejected as the design doc's explicit "removed constraints" list; free-text
+  planner output with parse-only validation was rejected in favor of
+  `json_schema()` feeding a provider's structured-output mode.
 - **Consequences:** `Workflow.entry: String` became `entries: Vec<String>`
   (`WorkflowBuilder::entry` is additive); `detect_cycle` runs DFS from every
   entry; `SupervisorEvent::WorkflowStarted` carries `entries: Vec<String>`.
@@ -273,7 +275,11 @@ MCP server).**
   every `DagNode` against that in-memory snapshot, instead of querying the store
   once per node.
 - **Context:** PR #1 code review finding #6 was "`build_registry_and_workflow`
-  queried the registry once per node."
+  queried the registry once per node" — a pattern introduced by commit
+  `8216a76` (`feat(orchestrator): add registry bridge, build from DagSpec, and
+  Orchestrator::submit`) and fixed by commit `8eb4426` (`fix(mcp,orchestrator):
+  address PR review findings`), whose message states "Resolve all DAG nodes
+  against a single RegistryStore snapshot instead of one query per node."
 - **Alternatives rejected:** Per-node queries were rejected as the flagged
   defect; a snapshot amortizes the query cost across the whole DAG at the cost
   of resolving every node against a single point-in-time view of instance
@@ -283,7 +289,7 @@ MCP server).**
   only healthy instance goes unhealthy between build calls is caught on the next
   `submit`/`recover`, not mid-build.
 - **Ref:** PR #1 (`feat: LLM-planned dynamic workflows and aether-mcp server`),
-  commit `8216a76`.
+  commit `8eb4426`.
 
 ### Explicit `WorkflowBuilder::entry()` setter
 - **Decision:** `WorkflowBuilder::entry(node)` lets a caller declare an entry
