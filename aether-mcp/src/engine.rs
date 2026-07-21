@@ -43,4 +43,14 @@ impl McpEngine {
     pub async fn expire_gates(&self) -> Result<Vec<(String, String)>, aether_core::AetherError> {
         self.orchestrator.expire_gates().await
     }
+
+    pub async fn recoverable(
+        &self,
+    ) -> Result<Vec<aether_core::ExecutionRecord>, aether_core::AetherError> {
+        self.orchestrator.recoverable().await
+    }
+
+    pub async fn recover(&self, id: uuid::Uuid) -> aether_core::Outcome {
+        self.orchestrator.recover(id).await
+    }
 }
