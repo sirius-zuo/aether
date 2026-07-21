@@ -19,7 +19,12 @@ use crate::{
 };
 
 /// Build an executable `AgentNode` for a resolved live instance.
-fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>) -> AgentNode {
+fn registration_to_node(
+    node_id: &str,
+    http_url: &str,
+    instruction: Option<&str>,
+    gate_deadline_secs: Option<u64>,
+) -> AgentNode {
     let mut metadata = HashMap::new();
     if let Some(instr) = instruction {
         metadata.insert("instruction".to_string(), instr.to_string());
@@ -36,6 +41,7 @@ fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>
         timeout: Duration::from_secs(300),
         shutdown_grace: Duration::from_secs(5),
         metadata,
+        gate_deadline_secs,
     }
 }
 
@@ -98,6 +104,7 @@ async fn build_registry_and_workflow(
             &node.id,
             &entry.http_url,
             node.instruction.as_deref(),
+            node.gate_deadline_secs,
         ));
     }
 
@@ -422,7 +429,7 @@ mod tests {
 
     #[test]
     fn registration_to_node_sets_instruction_metadata() {
-        let node = registration_to_node("n1", "http://127.0.0.1:8080", Some("go"));
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", Some("go"), None);
         assert_eq!(node.name, "n1");
         assert_eq!(
             node.metadata.get("instruction").map(String::as_str),
@@ -432,8 +439,14 @@ mod tests {
 
     #[test]
     fn registration_to_node_without_instruction_has_empty_metadata() {
-        let node = registration_to_node("n1", "http://127.0.0.1:8080", None);
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", None, None);
         assert!(node.metadata.is_empty());
+    }
+
+    #[test]
+    fn registration_to_node_carries_gate_deadline_secs() {
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", None, Some(120));
+        assert_eq!(node.gate_deadline_secs, Some(120));
     }
 
     #[tokio::test]

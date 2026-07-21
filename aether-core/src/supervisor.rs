@@ -853,6 +853,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
+            gate_deadline_secs: None,
         }
     }
 
@@ -964,6 +965,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata,
+            gate_deadline_secs: None,
         });
         let wf = Workflow {
             entries: vec!["worker".to_string()],
@@ -1077,6 +1079,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
+            gate_deadline_secs: None,
         });
         r.register(mk_node("good"));
 
@@ -1128,6 +1131,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
+            gate_deadline_secs: None,
         });
         r.register(mk_node("after"));
         let wf = Workflow::builder(&r).edge("gate", "after").build().unwrap();
@@ -1196,6 +1200,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
+            gate_deadline_secs: None,
         });
         let wf = Workflow::builder(&r).entry("gate").build().unwrap();
 
@@ -1255,6 +1260,7 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     shutdown_grace: Duration::from_secs(1),
                     metadata: HashMap::new(),
+                    gate_deadline_secs: None,
                 });
             }
             r

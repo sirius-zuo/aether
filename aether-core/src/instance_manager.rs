@@ -215,6 +215,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             shutdown_grace: Duration::from_secs(1),
             metadata: HashMap::new(),
+            gate_deadline_secs: None,
         }
     }
 

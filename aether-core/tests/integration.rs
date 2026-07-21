@@ -106,6 +106,7 @@ fn echo_node(name: &str, http_url: &str) -> AgentNode {
         timeout: Duration::from_secs(10),
         shutdown_grace: Duration::from_secs(1),
         metadata: HashMap::new(),
+        gate_deadline_secs: None,
     }
 }
 

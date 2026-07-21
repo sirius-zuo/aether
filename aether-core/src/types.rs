@@ -38,6 +38,9 @@ pub struct AgentNode {
     /// SIGTERM grace period before SIGKILL (PerRequest + StdioTransport only). Default: 5s.
     pub shutdown_grace: Duration,
     pub metadata: HashMap<String, String>,
+    /// Node-level default gate deadline (seconds from park time), sourced from
+    /// the DAG. `None` = no default; an agent-supplied deadline still applies.
+    pub gate_deadline_secs: Option<u64>,
 }
 
 impl Clone for AgentNode {
@@ -51,6 +54,7 @@ impl Clone for AgentNode {
             timeout: self.timeout,
             shutdown_grace: self.shutdown_grace,
             metadata: self.metadata.clone(),
+            gate_deadline_secs: self.gate_deadline_secs,
         }
     }
 }
