@@ -299,14 +299,16 @@ Newest first.
 - **Invariant:** the HTTP transport binds `127.0.0.1` only — there is no
   configurable host, matching the equivalent invariant on
   [Dashboard](dashboard.md)'s server.
-- **Gotcha:** `list_capabilities` returns `Ok(Vec<String>)` on success but
-  its JSON-RPC error path (`Err(e) => JsonRpcResponse::error(id, -32000,
-  e.to_string())`) is the only tool of the three that can surface an
-  `aether_core::AetherError` (a `RegistryStore` I/O failure) as a JSON-RPC
-  error rather than a tool-content success payload; `submit_goal` and
-  `get_result` never take this path since their fallible steps (bad
-  `workflow_id`, missing `goal`) are argument-validation, mapped to
-  `-32602`.
+- **Gotcha:** `list_capabilities`, `expire_gates`, and `list_recoverable`
+  each return `Ok(...)` on success but share the identical JSON-RPC error
+  path `Err(e) => JsonRpcResponse::error(id, -32000, e.to_string())`,
+  surfacing an `aether_core::AetherError` (e.g. a `RegistryStore`/
+  `ExecutionStore` I/O failure) as a JSON-RPC error rather than a
+  tool-content success payload; `submit_goal` and `get_result` never take
+  this path since their fallible steps (bad `workflow_id`, missing `goal`)
+  are argument-validation, mapped to `-32602`, and `recover_workflow` has no
+  `-32000` arm at all — its failures come back as a successful tool-content
+  payload wrapping an `Outcome::Failed`.
 
 ## Source Anchors
 
