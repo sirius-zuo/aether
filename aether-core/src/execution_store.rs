@@ -129,8 +129,10 @@ impl ExecutionStore {
             );",
         )
         .map_err(store_err)?;
-        // Additive migration: older DBs lack the lease columns. ALTER is
-        // idempotent here because we ignore the "duplicate column name" error.
+        // Additive migration for older DBs that predate the lease columns.
+        // On a fresh DB the columns already exist, so ALTER errors every time;
+        // we deliberately ignore ALL errors here — these are two fixed
+        // ADD COLUMN statements, and any real DB fault surfaces on the next query.
         for stmt in [
             "ALTER TABLE executions ADD COLUMN claimed_by TEXT",
             "ALTER TABLE executions ADD COLUMN lease_expiry TEXT",
@@ -457,6 +459,7 @@ impl ExecutionStore {
     /// Claim `workflow_id` for driving under `driver`, leasing until
     /// `lease_expiry_rfc3339`. Succeeds when the row is unclaimed, already held
     /// by `driver`, or its lease has expired (`lease_expiry < now`).
+    /// Timestamps must be UTC-normalized RFC3339 (e.g. produced via `chrono::Utc::now().to_rfc3339()`).
     pub async fn claim_execution(
         &self,
         workflow_id: &str,
@@ -481,6 +484,7 @@ impl ExecutionStore {
     }
 
     /// Extend `driver`'s lease on `workflow_id`. No-op if `driver` isn't the holder.
+    /// Timestamps must be UTC-normalized RFC3339 (e.g. produced via `chrono::Utc::now().to_rfc3339()`).
     pub async fn renew_lease(
         &self,
         workflow_id: &str,
@@ -757,5 +761,31 @@ mod tests {
         // After release by the holder, a fresh driver can claim.
         store.release_execution("wf", "d2").await.unwrap();
         assert!(store.claim_execution("wf", "d3", later, "2026-01-01T01:05:00+00:00").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn renew_extends_and_nonholder_ops_are_noops() {
+        let store = ExecutionStore::open_temp();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        let now = "2026-01-01T00:00:00+00:00";
+        let soon = "2026-01-01T00:05:00+00:00";
+        assert!(store.claim_execution("wf", "d1", now, soon).await.unwrap());
+
+        // A non-holder cannot renew: after d2's failed renew, d1 still holds the
+        // ORIGINAL lease, so d2 still cannot claim before expiry.
+        store.renew_lease("wf", "d2", "2026-01-01T09:00:00+00:00").await.unwrap();
+        assert!(!store.claim_execution("wf", "d2", now, soon).await.unwrap(),
+            "non-holder renew must not extend/steal the lease");
+
+        // The holder renews to a far-future expiry; the lease is still live at `soon`.
+        store.renew_lease("wf", "d1", "2026-01-01T10:00:00+00:00").await.unwrap();
+        let just_after_soon = "2026-01-01T00:06:00+00:00";
+        assert!(!store.claim_execution("wf", "d2", just_after_soon, "2026-01-01T00:11:00+00:00").await.unwrap(),
+            "holder's renewal must have extended the lease past the old expiry");
+
+        // A non-holder release is a no-op: d1 still holds it.
+        store.release_execution("wf", "d2").await.unwrap();
+        assert!(!store.claim_execution("wf", "d2", just_after_soon, "2026-01-01T00:11:00+00:00").await.unwrap(),
+            "non-holder release must not free the lease");
     }
 }
