@@ -4,8 +4,9 @@
 
 This is the contract every agent process speaks to Aether, and the HTTP
 mechanics that carry it. `Envelope` is the sole message shape crossing the
-process boundary — `Invoke` in, `Result`/`Error`/`Suspended` back — framed as
-newline-delimited JSON in the wire-protocol spec. `Transport` and
+process boundary — `Invoke` in, `Result`/`Error`/`Suspended` back — carried
+as a whole-body JSON document over HTTP (the original wire-protocol spec
+framed it as newline-delimited JSON, since retired). `Transport` and
 `AgentFactory` are the traits that abstract "reach an agent process";
 `HttpTransport`/`HttpAgentFactory` are their only current implementation,
 POSTing `Envelope`s to an agent's `/aether/invoke` and `/aether/resume`
@@ -36,8 +37,6 @@ classDiagram
         Result
         Error
         Suspended
-        Ping
-        Pong
     }
     class Envelope {
         +id: Uuid
@@ -45,7 +44,6 @@ classDiagram
         +payload: Value
         +metadata: HashMap~String, String~
         +invoke(payload, metadata)$ Envelope
-        +ping(id)$ Envelope
     }
     class Transport {
         <<trait>>
@@ -71,6 +69,7 @@ classDiagram
         +approval_id: String
         +kind: String
         +prompt: String
+        +gate_deadline: Option~String~
     }
     class ApprovalDecision {
         <<enum>>
@@ -95,19 +94,15 @@ classDiagram
 ```
 
 `Envelope` is `{ id: Uuid, kind: EnvelopeKind, payload: Value, metadata:
-HashMap<String, String> }`. `EnvelopeKind::invoke` and `EnvelopeKind::ping`
-are the only two constructors; every other kind (`Result`, `Error`,
-`Suspended`, `Pong`) is produced by the agent side and simply deserialized.
-`payload_text` is the one piece of payload-shaping logic that lives on the
-`Envelope` side of the boundary: given an arbitrary JSON value, it returns a
-plain string by checking object keys in the order `input`, `output`,
-`message`, `goal`, and otherwise joining nested values with `\n\n---\n\n`
-(objects by value, arrays by element) — this is what lets one function read
-both a fan-in map keyed by upstream node id and a single prior node's
-`{"output": ...}` reply. `write_envelope`/`read_envelope` implement the
-newline-delimited JSON framing the original wire-protocol spec calls for:
-serialize to one line, `\n`-terminate, flush; on read, one `read_line` call
-per `Envelope`, `Ok(None)` on EOF.
+HashMap<String, String> }`. `EnvelopeKind::invoke` is the only constructor;
+every other kind (`Result`, `Error`, `Suspended`) is produced by the agent
+side and simply deserialized. `payload_text` is the one piece of
+payload-shaping logic that lives on the `Envelope` side of the boundary:
+given an arbitrary JSON value, it returns a plain string by checking object
+keys in the order `input`, `output`, `message`, `goal`, and otherwise
+joining nested values with `\n\n---\n\n` (objects by value, arrays by
+element) — this is what lets one function read both a fan-in map keyed by
+upstream node id and a single prior node's `{"output": ...}` reply.
 
 `Transport` (`send`, `resume`, `shutdown`) and `AgentFactory` (`create`) are
 the two traits every agent-reaching call goes through. `resume` has a
@@ -269,41 +264,31 @@ of the base `Invoke`/`Result`/`Error` exchange.
   actual stuck node instead of an empty string.
 - **Ref:** 2026-06-24, PR #3, commit `3762504`.
 
-### Newline-delimited JSON as the Envelope wire encoding
-- **Decision:** `write_envelope`/`read_envelope` frame each `Envelope` as one
-  line of JSON terminated by `\n`, read back with a single `read_line` call
-  per envelope.
-- **Context:** the original design spec states this as the starting contract:
-  "The sole contract between Aether and AgentVerse. Newline-delimited JSON,"
-  written against the stdio/Unix-socket transports of that era, where
-  multiple `Envelope`s could be exchanged over one long-lived connection.
-- **Alternatives rejected:** No PR or design doc records alternatives
-  considered; observed current state: `HttpTransport` does not call
-  `write_envelope`/`read_envelope` at all — it serializes/deserializes a
-  single `Envelope` as a whole HTTP request/response body via reqwest's
-  `.json()` — so the NDJSON codec is exercised only by its own unit tests
-  today, not by the transport actually shipping.
-- **Consequences:** the codec functions and their line-framing behavior are
-  effectively dormant on the current HTTP-only path; reviving a
-  streaming/multi-message transport (e.g. a WebSocket or the stdio mode the
-  original spec sketched) would be the first consumer to exercise them
-  outside tests.
-- **Ref:** 2026-05-17, commit `e8dd39f`.
+### `HttpTransport` exchanges whole-body JSON; the original NDJSON codec was removed as vestigial
+- **Decision:** `HttpTransport` serializes/deserializes a single `Envelope`
+  as a whole HTTP request/response body via reqwest's `.json()`. The
+  newline-delimited-JSON envelope codec from the original stdio/Unix-socket
+  transports — one function to serialize-and-frame an `Envelope` as a line,
+  one to read a line back — was never called by `HttpTransport` and has
+  since been deleted outright rather than left in place unused.
+- **Context:** the original design spec states NDJSON framing as the
+  starting contract: "The sole contract between Aether and AgentVerse.
+  Newline-delimited JSON," written against the stdio/Unix-socket transports
+  of that era, where multiple `Envelope`s could be exchanged over one
+  long-lived connection. Once the HTTP-registry plan replaced those
+  transports, that codec had no caller left outside its own unit tests.
+- **Alternatives rejected:** keeping the dead codec around in case a future
+  streaming transport wanted line-framing was rejected in favor of deleting
+  it as part of a wider triage-cleanup pass — unused code with no caller was
+  treated as dead weight, not a hedge worth carrying.
+- **Consequences:** `aether-core`'s `lib.rs` no longer re-exports the codec's
+  functions; `HttpTransport` (the only shipping transport) is unaffected,
+  since it never depended on them.
+- **Ref:** 2026-05-17, commit `e8dd39f` (original NDJSON codec introduced);
+  2026-07-21, PR #10, commit `5e9e28c` (removed as vestigial).
 
 ## Implementation Notes
 
-- **Gotcha (dead code):** `read_envelope`/`write_envelope` are `pub use`-exported
-  from `lib.rs` but have no caller anywhere in `aether-core`, `aether-mcp`, or
-  `aether-dashboard` outside their own `#[cfg(test)]` module.
-  `HttpTransport` sends/receives whole-body JSON via `reqwest`'s `.json()`
-  instead. This is vestigial from the removed stdio/Unix-socket transports,
-  not a wired code path.
-- **Gotcha (unwired kind):** `EnvelopeKind::Ping`/`Pong` and the
-  `Envelope::ping` constructor exist and round-trip in tests, but nothing in
-  `InstanceManager` or `HttpTransport` ever sends a `Ping`. The original
-  design spec described periodic `Ping`/`Pong` health probes; what actually
-  ships is a separate, unrelated HTTP `/health` endpoint polled by
-  `health_poller` outside the `Transport`/`Envelope` path entirely.
 - **Invariant:** `Transport::resume`'s default implementation always returns
   `AetherError::TransportError` with an "unsupported" message — any new
   `Transport` implementation silently does not support resume until it

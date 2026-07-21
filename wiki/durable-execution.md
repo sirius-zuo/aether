@@ -74,6 +74,9 @@ classDiagram
         +park_node(id, node, session, approval, kind, prompt, deadline)
         +finish_execution(id, status, result, error)
         +expire_gates(now) Vec~String, String~
+        +claim_execution(id, driver, now, expiry) bool
+        +renew_lease(id, driver, expiry)
+        +release_execution(id, driver)
     }
     class RegistryStatus {
         <<enum>>
@@ -120,12 +123,14 @@ classDiagram
 `ExecutionStore` mirrors `RegistryStore`: `rusqlite` behind
 `Arc<Mutex<Connection>>`, every op via `spawn_blocking`, `CREATE TABLE IF NOT
 EXISTS` in `open()` (no migration crate). `executions` holds one row per run
-(status, `workflow_spec` for ready-queue rebuild, terminal `result`/`error`);
-`execution_nodes` one row per node with a suspend-correlation group
-(`session_id`, `approval_id`, `kind`, `prompt`, `gate_deadline`) populated
-only while parked and cleared by `complete_node` in the same `UPDATE` that
-sets `status='done'`. `exec_write` funnels single-row writes;
-`create_execution`/`expire_gates` use `Connection::transaction` for atomicity.
+(status, `workflow_spec` for ready-queue rebuild, terminal `result`/`error`,
+plus `claimed_by`/`lease_expiry` for the driver lease, added by an additive
+`ALTER TABLE ADD COLUMN` migration in `open()`); `execution_nodes` one row per
+node with a suspend-correlation group (`session_id`, `approval_id`, `kind`,
+`prompt`, `gate_deadline`) populated only while parked and cleared by
+`complete_node` in the same `UPDATE` that sets `status='done'`. `exec_write`
+funnels single-row writes; `create_execution`/`expire_gates` use
+`Connection::transaction` for atomicity.
 
 `RegistryStore` is the equivalent store for live agent instances: `agents`
 (keyed by `instance_id`, unique on `http_url`) plus an `events` table fed by
@@ -216,20 +221,21 @@ fresh `Transport`, call it, and `shutdown` it afterward.
   node's agent can no longer be resolved.
 - **Ref:** 2026-07-19, PR #5, commit `ad8f027`.
 
-### No-concurrent-driver precondition is documentation-only
-- **Decision:** `recoverable`/`recover`/`resume_execution` carry a doc
-  comment precondition — no active driver in this process — instead of an
-  in-code guard (e.g. a per-`workflow_id` lock).
-- **Context:** commit `9e5e12e`: "`recoverable()` returns every active row
-  (incl. live in-flight runs, since the `ExecutionStore` is now shared), so
-  `recover(id)` must only be used for crash/restart orphans or two drive
-  loops race the same rows."
-- **Alternatives rejected:** PR #5's body notes "a stronger in-process
-  driver guard is a noted follow-up" — deferred, not rejected.
-- **Consequences:** nothing stops `recover` from running against an id a
-  live driver still owns, producing duplicate dispatch and interleaved
-  checkpoints; safety depends entirely on operator discipline.
-- **Ref:** 2026-07-18, PR #5, commits `093d220`, `9e5e12e`.
+### No-concurrent-driver guard is a DB lease (claimed_by / lease_expiry)
+- **Decision:** `recover`/`resume_execution`/`submit` now claim the
+  `executions` row via `claim_execution` (a per-driver `claimed_by` +
+  `lease_expiry`) before driving, renew it once per BFS level in `drive`,
+  and release it afterward; a claim against a row a live driver still holds
+  is refused with an "already being driven" `Outcome::Failed`.
+- **Context:** commit `9e5e12e` warned `recover(id)` must only target
+  crash/restart orphans, or two drive loops race the same rows
+  (`recoverable()` returns every active row, in-flight included); PR #5
+  called a stronger guard "a noted follow-up" — it landed as this lease.
+- **Consequences:** the guard now covers the real **cross-process** race
+  (`aether-core` and `aether-mcp` share one store), not just in-process; a
+  crashed driver's lease lapses after the lease window so its orphan
+  becomes reclaimable.
+- **Ref:** Group B PR (gate-deadline expiry + DB driver lease, PR #9).
 
 ### Persistent `ExecutionStore` becomes load-bearing; in-memory constructors deleted
 - **Decision:** `Orchestrator::new` now requires a caller-supplied
@@ -266,16 +272,18 @@ fresh `Transport`, call it, and `shutdown` it afterward.
 
 ### Gate-deadline expiry is an on-demand sweep, not a background job
 - **Decision:** `expire_gates(now)` sweeps every `suspended` node whose
-  `gate_deadline` passed, failing node and execution in one transaction —
-  a method a caller invokes, not a `tokio::spawn`ed loop like `HealthPoller::run`.
+  `gate_deadline` passed, failing node and execution in one transaction — a
+  method a caller invokes, not a `tokio::spawn`ed loop. An operator triggers
+  it via the `aether-mcp expire-gates` CLI subcommand or the `expire_gates`
+  MCP tool, both calling `Orchestrator::expire_gates`.
 - **Context:** the design doc's §6: "Aether mirrors an optional
   workflow-level `gate_deadline` on a parked node; on expiry the node →
   `failed`... so an unanswered gate cannot park a run forever."
-- **Alternatives rejected:** No PR or design doc records why a background
-  loop wasn't chosen instead; observed current state: nothing calls
-  `expire_gates` in production — see Implementation Notes.
-- **Consequences:** the §6 "cannot park a run forever" guarantee is only as
-  good as whatever ends up calling this sweep.
+- **Alternatives rejected:** no PR or design doc records why a background
+  loop wasn't chosen. A parked node's deadline is `SuspendPayload.
+  gate_deadline` (agent override) else `gate_deadline_secs` (`now + secs`).
+- **Consequences:** an unanswered gate cannot park a run forever *once an
+  operator runs the sweep* — the guarantee is operator-invoked, not automatic.
 - **Ref:** 2026-07-18, PR #4, commit `b8dd0d3`.
 
 ### SQLite-backed `RegistryStore` for durable, cross-process agent registration
@@ -294,19 +302,11 @@ fresh `Transport`, call it, and `shutdown` it afterward.
 
 ## Implementation Notes
 
-- **Known debt (unwired sweep):** `expire_gates` (see Key Decisions above)
-  is implemented and tested, but nothing in `aether-core`'s binaries or
-  `aether-mcp` calls it, and no production path passes `Some(deadline)`
-  into `park_node` — both call sites hardcode `None`, and `SuspendPayload`
-  has no deadline field to source one from. Every parked node today has
-  `gate_deadline = NULL`; the design doc's "an unanswered gate cannot park
-  a run forever" is not currently true of the shipped system.
-- **Known debt (no-concurrent-driver guard):** the precondition that
-  `recover`/`resume_execution` must not run against an id with a live
-  driver (see Key Decisions above) is enforced only by doc comments, not
-  code — the same gap [Orchestration Core](orchestration-core.md) flags on
-  `Supervisor::recover`; here it is the `ExecutionStore` side of the same
-  race.
+- **Now wired:** both prior "known debt" items are resolved (see Key
+  Decisions above): `expire_gates` is reachable via the CLI subcommand and
+  MCP tool with a real `park_node` deadline (no longer hardcoded `None`),
+  and the no-concurrent-driver guard is now the DB lease
+  (`claim_execution`/`renew_lease`/`release_execution`), not a doc comment.
 - **Invariant:** `complete_node` is the only path to `NodeStatus::Done` and
   unconditionally clears suspend correlation in the same `UPDATE` (see Key
   Decisions above); any future write path to `done` must preserve this.
@@ -314,13 +314,13 @@ fresh `Transport`, call it, and `shutdown` it afterward.
   execution row to `Running` before calling `drive`, even though it may
   last have been written `Suspended` — otherwise a run that ultimately
   succeeds would still read back as `Suspended` if `finalize` were skipped.
-- **Gotcha (perf):** `node_ready_input` does one full `load_execution`
-  round trip per fired edge per BFS level rather than one snapshot per
-  level; a non-blocking follow-up noted in the PR #4 body, not yet fixed.
-- **Gotcha:** `RegistryStore::register`'s same-`http_url` re-registration
-  deletes the prior row before inserting the new `instance_id`; any caller
-  still holding the old `instance_id` finds `deregister`/`update_health` on
-  it silently no-op.
+- **Fixed (perf):** `drive` loads one `load_execution` snapshot per BFS
+  level for the pure `ready_input_from_snapshot` helper, not one round trip
+  per edge; `node_ready_input` is now a thin loader over it.
+- **Gotcha (now observable):** `RegistryStore::register`'s same-`http_url`
+  re-registration still deletes the prior row, but `register` now returns
+  the displaced `instance_id` and `registry_server.rs` logs a `tracing::warn!`
+  — superseded, but no longer silent.
 - **Invariant:** `InstanceManager::dispatch` and `::resume` route through
   the identical `Singleton`/`Pool`/`PerRequest` match — see
   [Wire Protocol & Transport](wire-protocol-transport.md) for the resume

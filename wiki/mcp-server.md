@@ -38,6 +38,9 @@ classDiagram
         +submit_goal(goal) Uuid
         +get_result(id) Option~JobState~
         +list_capabilities() Vec~String~
+        +expire_gates() Vec~(String, String)~
+        +recoverable() Vec~ExecutionRecord~
+        +recover(id) Outcome
     }
     class JobStore {
         +create() Uuid
@@ -67,7 +70,7 @@ classDiagram
     JobStore --> JobState : keyed by Uuid
     handle_message --> JsonRpcRequest : parses
     handle_message --> handle_request : delegates
-    handle_request --> McpEngine : calls submit_goal/get_result/list_capabilities
+    handle_request --> McpEngine : calls submit_goal/get_result/list_capabilities/expire_gates/recoverable/recover
     handle_request --> JsonRpcResponse : produces
     serve_stdio --> handle_message : per line
     serve_http --> handle_message : per POST body
@@ -84,9 +87,10 @@ polling client sees `{"status": "running"}` or
 `handle_message` (parses a raw string, returns a `-32700` error response on
 malformed JSON) and `handle_request` (dispatches a parsed request by
 `method`: `initialize`, `tools/list`, `tools/call`, or a `-32601` error for
-anything else). `tool_descriptors()` hard-codes the three tool schemas
-(`submit_goal`, `get_result`, `list_capabilities`); `handle_tool_call`
-matches `params.name` against the same three strings and wraps every
+anything else). `tool_descriptors()` hard-codes six tool schemas
+(`submit_goal`, `get_result`, `list_capabilities`, `expire_gates`,
+`list_recoverable`, `recover_workflow`); `handle_tool_call` matches
+`params.name` against the same six strings and wraps every
 successful result as MCP `content` (a single `text` block holding a
 JSON-encoded string) via `tool_content`. `stdio.rs` and `http.rs` are both
 thin: each transport's job is only to get a raw JSON-RPC string into
@@ -110,9 +114,10 @@ binary (`bin/aether-mcp.rs`) reads environment variables to build one
    nothing for it, HTTP's `handle` maps `None` to `202 Accepted` with an
    empty body.
 4. For `tools/call`, `handle_tool_call` matches `params.name` against
-   `"submit_goal"`, `"get_result"`, or `"list_capabilities"` and calls the
-   matching `McpEngine` method, wrapping the JSON result via `tool_content`
-   or returning a JSON-RPC `-32602`/`-32000` error.
+   `"submit_goal"`, `"get_result"`, `"list_capabilities"`, `"expire_gates"`,
+   `"list_recoverable"`, or `"recover_workflow"` and calls the matching
+   `McpEngine` method, wrapping the JSON result via `tool_content` or
+   returning a JSON-RPC `-32602`/`-32000`/`-32001` error.
 
 **2. `submit_goal` is asynchronous: it returns immediately and is polled via
 `get_result`.**
@@ -129,8 +134,8 @@ binary (`bin/aether-mcp.rs`) reads environment variables to build one
    parses it back into a `Uuid` and calls `JobStore::get`, returning
    `JobState::Running` while the spawned task is still in flight,
    `JobState::Done { result }` once `complete` has run, or (if the id is
-   unrecognized) a bare `{"status": "unknown"}` — not a JSON-RPC error —
-   from `handle_tool_call`.
+   unrecognized) a JSON-RPC **error** (`-32001`, `"unknown workflow_id:
+   {id}"`) from `handle_tool_call`.
 
 **3. The binary selects a transport and opens durable stores at startup.**
 1. `main` in `bin/aether-mcp.rs` reads `AETHER_DB_PATH` (default
@@ -218,11 +223,12 @@ Newest first.
 - **Ref:** 2026-06-23, PR #1, commit `8eb4426`.
 
 ### MCP surface over JSON-RPC with both stdio and HTTP transports
-- **Decision:** `aether-mcp` exposes the same three tools
-  (`submit_goal`, `get_result`, `list_capabilities`) over two independently
-  selectable transports — line-delimited JSON-RPC on stdio (`stdio.rs`) and
-  POST-per-message JSON-RPC over HTTP (`http.rs`) — both built on the same
-  `handle_message` dispatch.
+- **Decision:** `aether-mcp` exposes one shared tool set — 3 tools at this
+  PR (`submit_goal`, `get_result`, `list_capabilities`), grown since to 6
+  total with `expire_gates`, `list_recoverable`, and `recover_workflow` —
+  over two independently selectable transports — line-delimited JSON-RPC on
+  stdio (`stdio.rs`) and POST-per-message JSON-RPC over HTTP (`http.rs`) —
+  both built on the same `handle_message` dispatch.
 - **Context:** the llm-planner design doc's Stage 2 section (untracked)
   states: "Support both stdio and streamable HTTP/SSE behind the same tool
   implementations: HTTP/SSE matches aether's HTTP-everywhere model and the
@@ -254,31 +260,38 @@ Newest first.
   a long-running DAG could exceed typical MCP/HTTP client timeouts.
 - **Consequences:** a client must poll `get_result` to observe completion —
   there is no push notification on either transport (see the transport
-  parity decision above); `JobStore` entries are never evicted, so a
-  long-running server accumulates one `JobState` per submitted goal for the
-  life of the process.
+  parity decision above); at this PR `JobStore` retained every entry for the
+  life of the process, so a long-running server would accumulate one
+  `JobState` per submitted goal indefinitely — since capped by
+  `MAX_COMPLETED` (see Implementation Notes).
 - **Ref:** 2026-06-23, PR #1, commits `50526fd`, `301a5c4`.
 
 ## Implementation Notes
 
-- **Known debt (unbounded `JobStore`):** `JobStore::complete` overwrites a
-  job's entry in place but nothing ever removes a `Uuid` from the backing
-  `HashMap` — a long-lived `aether-mcp` process accumulates one `JobState`
-  per `submit_goal` call for its entire lifetime, with no TTL or eviction.
-- **Known debt (no startup recovery):** the binary opens the same
-  `ExecutionStore` an `Orchestrator::recover` call would use, but never
-  calls `recoverable`/`recover` itself; per the `829b9ff` commit message,
-  "No recovery call is added anywhere" — a process restart after a crash
-  leaves any in-flight execution rows unresolved until an operator invokes
-  recovery through some other path (there is no MCP tool for it either;
-  `tool_descriptors()` exposes only `submit_goal`, `get_result`, and
-  `list_capabilities`).
-- **Gotcha:** `handle_tool_call`'s `"get_result"` arm returns a *successful*
-  JSON-RPC result of `{"status": "unknown"}` for an id `JobStore` has never
-  seen — not a JSON-RPC error — so a client that mistypes a `workflow_id` or
+- **Resolved (bounded `JobStore`):** `JobStore` now caps retained
+  **completed** entries at `MAX_COMPLETED` (1024): `complete` pushes onto a
+  `VecDeque<Uuid>` of completed ids and evicts the oldest completed entry
+  from the backing `HashMap` once that queue exceeds 1024; a still-`Running`
+  job is excluded from the cap and stays put regardless of how long it
+  runs.
+- **Resolved (no startup recovery, by design):** the binary still never
+  calls `recoverable`/`recover` automatically at startup — a process
+  restart after a crash leaves in-flight execution rows as-is until an
+  operator acts — but recovery is no longer only reachable "through some
+  other path": operators can list candidates with the `list_recoverable`
+  tool and re-drive one with `recover_workflow`, and can sweep stuck gate
+  deadlines with the `expire_gates` tool or the `aether-mcp expire-gates`
+  CLI subcommand. `recover_workflow` is safe to call against an execution a
+  live driver still holds: `Supervisor::recover` claims the row via the same
+  DB lease (`claim_execution`/`claim_or_refuse`) Group B added, and refuses
+  with a "already being driven by another driver" `Outcome::Failed` instead
+  of racing the live run.
+- **Gotcha (was; now fixed):** `handle_tool_call`'s `"get_result"` arm used
+  to return a *successful* `{"status": "unknown"}` for an unrecognized id;
+  it now returns a JSON-RPC **error** (code `-32001`, `"unknown
+  workflow_id: {id}"`) instead, so a client that mistypes a `workflow_id` or
   polls after process restart (losing the in-memory `JobStore`) gets a
-  200-shaped response indistinguishable at the JSON-RPC layer from a
-  genuinely-unknown-but-valid id.
+  distinguishable error rather than a 200-shaped ambiguous response.
 - **Invariant:** `handle_message`/`handle_request` are the single dispatch
   path shared by both transports — any behavior change there (new tool, new
   error code, new top-level method) applies to stdio and HTTP identically
@@ -286,14 +299,16 @@ Newest first.
 - **Invariant:** the HTTP transport binds `127.0.0.1` only — there is no
   configurable host, matching the equivalent invariant on
   [Dashboard](dashboard.md)'s server.
-- **Gotcha:** `list_capabilities` returns `Ok(Vec<String>)` on success but
-  its JSON-RPC error path (`Err(e) => JsonRpcResponse::error(id, -32000,
-  e.to_string())`) is the only tool of the three that can surface an
-  `aether_core::AetherError` (a `RegistryStore` I/O failure) as a JSON-RPC
-  error rather than a tool-content success payload; `submit_goal` and
-  `get_result` never take this path since their fallible steps (bad
-  `workflow_id`, missing `goal`) are argument-validation, mapped to
-  `-32602`.
+- **Gotcha:** `list_capabilities`, `expire_gates`, and `list_recoverable`
+  each return `Ok(...)` on success but share the identical JSON-RPC error
+  path `Err(e) => JsonRpcResponse::error(id, -32000, e.to_string())`,
+  surfacing an `aether_core::AetherError` (e.g. a `RegistryStore`/
+  `ExecutionStore` I/O failure) as a JSON-RPC error rather than a
+  tool-content success payload; `submit_goal` and `get_result` never take
+  this path since their fallible steps (bad `workflow_id`, missing `goal`)
+  are argument-validation, mapped to `-32602`, and `recover_workflow` has no
+  `-32000` arm at all — its failures come back as a successful tool-content
+  payload wrapping an `Outcome::Failed`.
 
 ## Source Anchors
 
