@@ -80,6 +80,11 @@ fn tool_descriptors() -> Value {
             "description": "List capabilities aether can currently fulfill (healthy agents).",
             "inputSchema": { "type": "object", "properties": {} }
         }
+        ,{
+            "name": "expire_gates",
+            "description": "Operator sweep: fail any parked node whose gate deadline has passed. Returns the expired (workflow_id, node_id) pairs.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }
     ])
 }
 
@@ -162,6 +167,16 @@ async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) 
         }
         "list_capabilities" => match engine.list_capabilities().await {
             Ok(caps) => JsonRpcResponse::result(id, tool_content(json!({ "capabilities": caps }))),
+            Err(e) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        },
+        "expire_gates" => match engine.expire_gates().await {
+            Ok(pairs) => {
+                let expired: Vec<Value> = pairs
+                    .into_iter()
+                    .map(|(wid, nid)| json!({ "workflow_id": wid, "node_id": nid }))
+                    .collect();
+                JsonRpcResponse::result(id, tool_content(json!({ "expired": expired })))
+            }
             Err(e) => JsonRpcResponse::error(id, -32000, e.to_string()),
         },
         other => JsonRpcResponse::error(id, -32602, format!("unknown tool: {other}")),
@@ -273,5 +288,18 @@ mod tests {
             .to_string();
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["capabilities"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn tools_call_expire_gates_returns_expired_list() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: Some(json!(9)),
+            method: "tools/call".into(),
+            params: json!({ "name": "expire_gates", "arguments": {} }),
+        };
+        let resp = handle_request(&engine(), req).await.unwrap();
+        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["expired"], json!([]));
     }
 }

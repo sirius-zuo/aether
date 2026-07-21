@@ -382,6 +382,16 @@ impl Orchestrator {
             .await
     }
 
+    /// Operator-invoked sweep: fail every suspended node whose gate deadline has
+    /// passed (and its execution), in one transaction. Returns the
+    /// `(workflow_id, node_id)` pairs that were failed. Nothing calls this on a
+    /// timer — an operator triggers it via the CLI subcommand or MCP tool.
+    pub async fn expire_gates(&self) -> Result<Vec<(String, String)>, AetherError> {
+        self.execution_store
+            .expire_gates(&chrono::Utc::now().to_rfc3339())
+            .await
+    }
+
     /// Sorted, de-duplicated capabilities advertised by healthy instances.
     pub async fn list_capabilities(&self) -> Result<Vec<String>, AetherError> {
         let all = self.store.list_all().await?;
@@ -618,5 +628,19 @@ mod tests {
     fn dag_from_planner_output_errors_without_output_field() {
         use serde_json::json;
         assert!(super::dag_from_planner_result(&json!({ "nope": 1 })).is_err());
+    }
+
+    #[tokio::test]
+    async fn expire_gates_fails_past_deadline_via_orchestrator() {
+        let reg = RegistryStore::open_temp();
+        let exec = ExecutionStore::open_temp();
+        exec.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        exec.park_node("wf", "a", "s", "ap", "phase_gate", "ok?",
+                       Some("2000-01-01T00:00:00+00:00")).await.unwrap();
+        let orch = Orchestrator::new(reg, exec.clone());
+        let expired = orch.expire_gates().await.unwrap();
+        assert_eq!(expired, vec![("wf".to_string(), "a".to_string())]);
+        let (e, _n) = exec.load_execution("wf").await.unwrap().unwrap();
+        assert_eq!(e.status, crate::ExecutionStatus::Failed);
     }
 }

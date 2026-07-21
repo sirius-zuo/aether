@@ -39,4 +39,8 @@ impl McpEngine {
     pub async fn list_capabilities(&self) -> Result<Vec<String>, aether_core::AetherError> {
         self.orchestrator.list_capabilities().await
     }
+
+    pub async fn expire_gates(&self) -> Result<Vec<(String, String)>, aether_core::AetherError> {
+        self.orchestrator.expire_gates().await
+    }
 }
