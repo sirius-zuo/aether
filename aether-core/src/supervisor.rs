@@ -2,6 +2,7 @@ use crate::instance_manager::InstanceManager;
 use crate::{
     AetherError, AgentNode, AgentRegistry, Envelope, EnvelopeKind, HealthStatus, Outcome, Workflow,
 };
+use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -88,6 +89,17 @@ impl Supervisor {
     }
     pub fn store(&self) -> &crate::ExecutionStore {
         &self.store
+    }
+
+    /// Effective gate deadline for a parking node: agent-supplied absolute
+    /// deadline wins; else the node's `gate_deadline_secs` default (now + secs).
+    fn effective_gate_deadline(&self, node_name: &str, sp: &crate::SuspendPayload) -> Option<String> {
+        sp.gate_deadline.clone().or_else(|| {
+            self.registry
+                .get(node_name)
+                .and_then(|n| n.gate_deadline_secs)
+                .map(|secs| (Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339())
+        })
     }
 
     pub async fn run(&self, workflow: &Workflow, initial_payload: serde_json::Value) -> Outcome {
@@ -269,6 +281,7 @@ impl Supervisor {
                                 return self.fail_execution(&wid, &we).await;
                             }
                         };
+                    let deadline = self.effective_gate_deadline(&node_name, &sp);
                     if let Err(e) = self
                         .store
                         .park_node(
@@ -278,7 +291,7 @@ impl Supervisor {
                             &sp.approval_id,
                             &sp.kind,
                             &sp.prompt,
-                            None,
+                            deadline.as_deref(),
                         )
                         .await
                     {
@@ -509,6 +522,7 @@ impl Supervisor {
                     }
                 }
             };
+            let deadline = self.effective_gate_deadline(node_id, &sp);
             let _ = self
                 .store
                 .park_node(
@@ -518,7 +532,7 @@ impl Supervisor {
                     &sp.approval_id,
                     &sp.kind,
                     &sp.prompt,
-                    None,
+                    deadline.as_deref(),
                 )
                 .await;
             let _ = self.event_tx.send(SupervisorEvent::NodeSuspended {
@@ -1152,6 +1166,92 @@ mod tests {
         let after = nodes.iter().find(|n| n.node_id == "after").unwrap();
         assert_eq!(gate.status, crate::NodeStatus::Suspended);
         assert_eq!(after.status, crate::NodeStatus::Pending); // downstream NOT fired
+    }
+
+    #[tokio::test]
+    async fn park_stamps_effective_gate_deadline_agent_overrides_node() {
+        // Agent supplies an absolute deadline; it must win over the node default.
+        struct DeadlineSuspendTransport;
+        #[async_trait]
+        impl Transport for DeadlineSuspendTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                Ok(Envelope {
+                    kind: EnvelopeKind::Suspended,
+                    payload: serde_json::json!({
+                        "session_id": "s1", "approval_id": "a1", "kind": "phase_gate",
+                        "prompt": "ok?", "gate_deadline": "2099-01-01T00:00:00+00:00"
+                    }),
+                    ..msg
+                })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct F;
+        #[async_trait]
+        impl AgentFactory for F {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(DeadlineSuspendTransport))
+            }
+        }
+        let r = AgentRegistry::new();
+        r.register(AgentNode {
+            name: "gate".into(), capabilities: vec![], factory: Arc::new(F),
+            spawn: SpawnPolicy::PerRequest, failure: FailurePolicy::default(),
+            timeout: Duration::from_secs(5), shutdown_grace: Duration::from_secs(1),
+            metadata: HashMap::new(), gate_deadline_secs: Some(30),
+        });
+        let wf = Workflow::builder(&r).entry("gate").build().unwrap();
+        let store = crate::ExecutionStore::open_temp();
+        let sup = Supervisor::with_store(r, store.clone());
+        let wid = uuid::Uuid::new_v4();
+        sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
+        let (_e, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        let gate = nodes.iter().find(|n| n.node_id == "gate").unwrap();
+        assert_eq!(gate.gate_deadline.as_deref(), Some("2099-01-01T00:00:00+00:00"));
+    }
+
+    #[tokio::test]
+    async fn park_stamps_node_default_when_agent_omits_deadline() {
+        // Agent payload has NO gate_deadline → node default (now + 3600s) applies.
+        struct PlainSuspendTransport;
+        #[async_trait]
+        impl Transport for PlainSuspendTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                Ok(Envelope {
+                    kind: EnvelopeKind::Suspended,
+                    payload: serde_json::json!({
+                        "session_id": "s1", "approval_id": "a1",
+                        "kind": "phase_gate", "prompt": "ok?"
+                    }),
+                    ..msg
+                })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct PlainF;
+        #[async_trait]
+        impl AgentFactory for PlainF {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(PlainSuspendTransport))
+            }
+        }
+        let r = AgentRegistry::new();
+        r.register(AgentNode {
+            name: "gate".into(), capabilities: vec![], factory: Arc::new(PlainF),
+            spawn: SpawnPolicy::PerRequest, failure: FailurePolicy::default(),
+            timeout: Duration::from_secs(5), shutdown_grace: Duration::from_secs(1),
+            metadata: HashMap::new(), gate_deadline_secs: Some(3600),
+        });
+        let wf = Workflow::builder(&r).entry("gate").build().unwrap();
+        let store = crate::ExecutionStore::open_temp();
+        let sup = Supervisor::with_store(r, store.clone());
+        let wid = uuid::Uuid::new_v4();
+        sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
+        let (_e, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        let gate = nodes.iter().find(|n| n.node_id == "gate").unwrap();
+        let deadline = gate.gate_deadline.as_deref().expect("node default stamps a deadline");
+        assert!(chrono::DateTime::parse_from_rfc3339(deadline).is_ok(),
+            "stamped deadline must be valid RFC3339");
     }
 
     #[tokio::test]
