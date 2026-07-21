@@ -35,6 +35,24 @@ async fn main() {
         aether_core::ExecutionStore::open(&exec_db_path).expect("open execution store");
     let engine = McpEngine::new(Orchestrator::new(store, execution_store));
 
+    // Operator subcommand: `aether-mcp expire-gates` runs one gate sweep and exits.
+    if std::env::args().nth(1).as_deref() == Some("expire-gates") {
+        match engine.expire_gates().await {
+            Ok(pairs) => {
+                println!("{}", serde_json::json!({
+                    "expired": pairs.iter()
+                        .map(|(w, n)| serde_json::json!({ "workflow_id": w, "node_id": n }))
+                        .collect::<Vec<_>>()
+                }));
+                return;
+            }
+            Err(e) => {
+                eprintln!("expire-gates failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     match transport.as_str() {
         "http" => {
             let addr = SocketAddr::from(([127, 0, 0, 1], port));

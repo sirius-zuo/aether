@@ -8,6 +8,10 @@ pub struct SuspendPayload {
     pub approval_id: String,
     pub kind: String,
     pub prompt: String,
+    /// Absolute RFC3339 deadline the agent optionally sets for this gate. When
+    /// present it wins over the node-level `gate_deadline_secs` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_deadline: Option<String>,
 }
 
 /// Human decision relayed by aether to the agent's `/aether/resume` endpoint.
@@ -38,10 +42,34 @@ mod tests {
             approval_id: "a1".into(),
             kind: "tool_approval".into(),
             prompt: "Approve deleting file X?".into(),
+            gate_deadline: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: SuspendPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn suspend_payload_carries_optional_gate_deadline() {
+        let p = SuspendPayload {
+            session_id: "s1".into(),
+            approval_id: "a1".into(),
+            kind: "phase_gate".into(),
+            prompt: "ok?".into(),
+            gate_deadline: Some("2030-01-01T00:00:00+00:00".into()),
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["gate_deadline"], "2030-01-01T00:00:00+00:00");
+        let back: SuspendPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(back.gate_deadline.as_deref(), Some("2030-01-01T00:00:00+00:00"));
+
+        // Absent field deserializes to None AND is omitted on serialize (keeps
+        // the golden fixture round-trip green).
+        let none: SuspendPayload =
+            serde_json::from_str(r#"{"session_id":"s","approval_id":"a","kind":"k","prompt":"p"}"#)
+                .unwrap();
+        assert_eq!(none.gate_deadline, None);
+        assert!(serde_json::to_string(&none).unwrap().find("gate_deadline").is_none());
     }
 
     #[test]

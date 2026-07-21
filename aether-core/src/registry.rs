@@ -63,6 +63,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             shutdown_grace: Duration::from_secs(5),
             metadata: Default::default(),
+            gate_deadline_secs: None,
         }
     }
 

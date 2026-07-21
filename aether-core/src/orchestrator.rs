@@ -19,7 +19,12 @@ use crate::{
 };
 
 /// Build an executable `AgentNode` for a resolved live instance.
-fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>) -> AgentNode {
+fn registration_to_node(
+    node_id: &str,
+    http_url: &str,
+    instruction: Option<&str>,
+    gate_deadline_secs: Option<u64>,
+) -> AgentNode {
     let mut metadata = HashMap::new();
     if let Some(instr) = instruction {
         metadata.insert("instruction".to_string(), instr.to_string());
@@ -36,6 +41,7 @@ fn registration_to_node(node_id: &str, http_url: &str, instruction: Option<&str>
         timeout: Duration::from_secs(300),
         shutdown_grace: Duration::from_secs(5),
         metadata,
+        gate_deadline_secs,
     }
 }
 
@@ -98,6 +104,7 @@ async fn build_registry_and_workflow(
             &node.id,
             &entry.http_url,
             node.instruction.as_deref(),
+            node.gate_deadline_secs,
         ));
     }
 
@@ -375,6 +382,16 @@ impl Orchestrator {
             .await
     }
 
+    /// Operator-invoked sweep: fail every suspended node whose gate deadline has
+    /// passed (and its execution), in one transaction. Returns the
+    /// `(workflow_id, node_id)` pairs that were failed. Nothing calls this on a
+    /// timer — an operator triggers it via the CLI subcommand or MCP tool.
+    pub async fn expire_gates(&self) -> Result<Vec<(String, String)>, AetherError> {
+        self.execution_store
+            .expire_gates(&chrono::Utc::now().to_rfc3339())
+            .await
+    }
+
     /// Sorted, de-duplicated capabilities advertised by healthy instances.
     pub async fn list_capabilities(&self) -> Result<Vec<String>, AetherError> {
         let all = self.store.list_all().await?;
@@ -422,7 +439,7 @@ mod tests {
 
     #[test]
     fn registration_to_node_sets_instruction_metadata() {
-        let node = registration_to_node("n1", "http://127.0.0.1:8080", Some("go"));
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", Some("go"), None);
         assert_eq!(node.name, "n1");
         assert_eq!(
             node.metadata.get("instruction").map(String::as_str),
@@ -432,8 +449,14 @@ mod tests {
 
     #[test]
     fn registration_to_node_without_instruction_has_empty_metadata() {
-        let node = registration_to_node("n1", "http://127.0.0.1:8080", None);
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", None, None);
         assert!(node.metadata.is_empty());
+    }
+
+    #[test]
+    fn registration_to_node_carries_gate_deadline_secs() {
+        let node = registration_to_node("n1", "http://127.0.0.1:8080", None, Some(120));
+        assert_eq!(node.gate_deadline_secs, Some(120));
     }
 
     #[tokio::test]
@@ -605,5 +628,19 @@ mod tests {
     fn dag_from_planner_output_errors_without_output_field() {
         use serde_json::json;
         assert!(super::dag_from_planner_result(&json!({ "nope": 1 })).is_err());
+    }
+
+    #[tokio::test]
+    async fn expire_gates_fails_past_deadline_via_orchestrator() {
+        let reg = RegistryStore::open_temp();
+        let exec = ExecutionStore::open_temp();
+        exec.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        exec.park_node("wf", "a", "s", "ap", "phase_gate", "ok?",
+                       Some("2000-01-01T00:00:00+00:00")).await.unwrap();
+        let orch = Orchestrator::new(reg, exec.clone());
+        let expired = orch.expire_gates().await.unwrap();
+        assert_eq!(expired, vec![("wf".to_string(), "a".to_string())]);
+        let (e, _n) = exec.load_execution("wf").await.unwrap().unwrap();
+        assert_eq!(e.status, crate::ExecutionStatus::Failed);
     }
 }

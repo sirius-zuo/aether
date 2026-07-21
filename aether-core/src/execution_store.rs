@@ -109,6 +109,8 @@ impl ExecutionStore {
                 initial_payload TEXT NOT NULL,
                 result          TEXT,
                 error           TEXT,
+                claimed_by      TEXT,
+                lease_expiry    TEXT,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
             );
@@ -127,6 +129,16 @@ impl ExecutionStore {
             );",
         )
         .map_err(store_err)?;
+        // Additive migration for older DBs that predate the lease columns.
+        // On a fresh DB the columns already exist, so ALTER errors every time;
+        // we deliberately ignore ALL errors here — these are two fixed
+        // ADD COLUMN statements, and any real DB fault surfaces on the next query.
+        for stmt in [
+            "ALTER TABLE executions ADD COLUMN claimed_by TEXT",
+            "ALTER TABLE executions ADD COLUMN lease_expiry TEXT",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -294,6 +306,23 @@ impl ExecutionStore {
         Ok(())
     }
 
+    async fn exec_write_count(
+        &self,
+        sql: &'static str,
+        args: Vec<Option<String>>,
+    ) -> Result<usize, AetherError> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let params: Vec<&dyn rusqlite::ToSql> =
+                args.iter().map(|a| a as &dyn rusqlite::ToSql).collect();
+            conn.execute(sql, params.as_slice()).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(store_err)?
+        .map_err(store_err)
+    }
+
     pub async fn mark_node_running(
         &self,
         workflow_id: &str,
@@ -425,6 +454,70 @@ impl ExecutionStore {
         .await
         .map_err(store_err)?
         .map_err(store_err)
+    }
+
+    /// Claim `workflow_id` for driving under `driver`, leasing until
+    /// `lease_expiry_rfc3339`. Succeeds when the row is unclaimed, already held
+    /// by `driver`, or its lease has expired (`lease_expiry < now`).
+    /// Timestamps must be UTC-normalized RFC3339 (e.g. produced via `chrono::Utc::now().to_rfc3339()`).
+    pub async fn claim_execution(
+        &self,
+        workflow_id: &str,
+        driver: &str,
+        now_rfc3339: &str,
+        lease_expiry_rfc3339: &str,
+    ) -> Result<bool, AetherError> {
+        let n = self
+            .exec_write_count(
+                "UPDATE executions SET claimed_by=?2, lease_expiry=?4, updated_at=?3
+                 WHERE workflow_id=?1
+                   AND (claimed_by IS NULL OR claimed_by=?2 OR lease_expiry < ?3)",
+                vec![
+                    Some(workflow_id.into()),
+                    Some(driver.into()),
+                    Some(now_rfc3339.into()),
+                    Some(lease_expiry_rfc3339.into()),
+                ],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
+    /// Extend `driver`'s lease on `workflow_id`. No-op if `driver` isn't the holder.
+    /// Timestamps must be UTC-normalized RFC3339 (e.g. produced via `chrono::Utc::now().to_rfc3339()`).
+    pub async fn renew_lease(
+        &self,
+        workflow_id: &str,
+        driver: &str,
+        lease_expiry_rfc3339: &str,
+    ) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE executions SET lease_expiry=?3, updated_at=?4
+             WHERE workflow_id=?1 AND claimed_by=?2",
+            vec![
+                Some(workflow_id.into()),
+                Some(driver.into()),
+                Some(lease_expiry_rfc3339.into()),
+                Some(now),
+            ],
+        )
+        .await
+    }
+
+    /// Release `driver`'s claim on `workflow_id`. No-op if `driver` isn't the holder.
+    pub async fn release_execution(
+        &self,
+        workflow_id: &str,
+        driver: &str,
+    ) -> Result<(), AetherError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.exec_write(
+            "UPDATE executions SET claimed_by=NULL, lease_expiry=NULL, updated_at=?3
+             WHERE workflow_id=?1 AND claimed_by=?2",
+            vec![Some(workflow_id.into()), Some(driver.into()), Some(now)],
+        )
+        .await
     }
 }
 
@@ -636,5 +729,63 @@ mod tests {
             .await
             .unwrap();
         assert!(expired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_execution_is_unclaimed_and_claimable() {
+        let store = ExecutionStore::open_temp();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        let claimed = store
+            .claim_execution("wf", "driver-1", "2026-01-01T00:00:00+00:00",
+                             "2026-01-01T00:05:00+00:00")
+            .await
+            .unwrap();
+        assert!(claimed, "a fresh execution must be claimable");
+    }
+
+    #[tokio::test]
+    async fn claim_is_exclusive_until_release_or_expiry() {
+        let store = ExecutionStore::open_temp();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        let now = "2026-01-01T00:00:00+00:00";
+        let soon = "2026-01-01T00:05:00+00:00";
+
+        assert!(store.claim_execution("wf", "d1", now, soon).await.unwrap());
+        // A different live driver is refused.
+        assert!(!store.claim_execution("wf", "d2", now, soon).await.unwrap());
+        // The holder may re-claim (re-entrant).
+        assert!(store.claim_execution("wf", "d1", now, soon).await.unwrap());
+        // A stale lease (now past the expiry) is reclaimable by anyone.
+        let later = "2026-01-01T01:00:00+00:00";
+        assert!(store.claim_execution("wf", "d2", later, "2026-01-01T01:05:00+00:00").await.unwrap());
+        // After release by the holder, a fresh driver can claim.
+        store.release_execution("wf", "d2").await.unwrap();
+        assert!(store.claim_execution("wf", "d3", later, "2026-01-01T01:05:00+00:00").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn renew_extends_and_nonholder_ops_are_noops() {
+        let store = ExecutionStore::open_temp();
+        store.create_execution("wf", "{}", "{}", &["a".into()]).await.unwrap();
+        let now = "2026-01-01T00:00:00+00:00";
+        let soon = "2026-01-01T00:05:00+00:00";
+        assert!(store.claim_execution("wf", "d1", now, soon).await.unwrap());
+
+        // A non-holder cannot renew: after d2's failed renew, d1 still holds the
+        // ORIGINAL lease, so d2 still cannot claim before expiry.
+        store.renew_lease("wf", "d2", "2026-01-01T09:00:00+00:00").await.unwrap();
+        assert!(!store.claim_execution("wf", "d2", now, soon).await.unwrap(),
+            "non-holder renew must not extend/steal the lease");
+
+        // The holder renews to a far-future expiry; the lease is still live at `soon`.
+        store.renew_lease("wf", "d1", "2026-01-01T10:00:00+00:00").await.unwrap();
+        let just_after_soon = "2026-01-01T00:06:00+00:00";
+        assert!(!store.claim_execution("wf", "d2", just_after_soon, "2026-01-01T00:11:00+00:00").await.unwrap(),
+            "holder's renewal must have extended the lease past the old expiry");
+
+        // A non-holder release is a no-op: d1 still holds it.
+        store.release_execution("wf", "d2").await.unwrap();
+        assert!(!store.claim_execution("wf", "d2", just_after_soon, "2026-01-01T00:11:00+00:00").await.unwrap(),
+            "non-holder release must not free the lease");
     }
 }

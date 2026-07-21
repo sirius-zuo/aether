@@ -235,6 +235,7 @@ fn http_node(node_id: &str, http_url: &str) -> AgentNode {
         timeout: std::time::Duration::from_secs(30),
         shutdown_grace: std::time::Duration::from_secs(1),
         metadata: std::collections::HashMap::new(),
+        gate_deadline_secs: None,
     }
 }
 

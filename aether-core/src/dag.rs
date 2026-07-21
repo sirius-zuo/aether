@@ -28,6 +28,11 @@ pub struct DagNode {
     /// Flat key-value bag for arbitrary per-node configuration.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Optional per-node gate deadline, in seconds from park time. When this node
+    /// suspends for a human gate, aether stamps `gate_deadline = park_time + this`
+    /// unless the agent's `SuspendPayload` supplies its own absolute deadline.
+    #[serde(default)]
+    pub gate_deadline_secs: Option<u64>,
 }
 
 /// A complete planned DAG.
@@ -275,5 +280,17 @@ mod tests {
             { "id": "b", "capability": "y", "depends_on": ["a"] }
         ]));
         assert_eq!(d.terminal_ids(), vec!["b"]);
+    }
+
+    #[test]
+    fn gate_deadline_secs_round_trips_and_defaults_none() {
+        let with = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [], "gate_deadline_secs": 3600 }
+        ]));
+        assert_eq!(with.nodes[0].gate_deadline_secs, Some(3600));
+        let without = dag(serde_json::json!([
+            { "id": "a", "capability": "x", "depends_on": [] }
+        ]));
+        assert_eq!(without.nodes[0].gate_deadline_secs, None);
     }
 }

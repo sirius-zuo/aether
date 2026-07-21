@@ -60,6 +60,7 @@ async fn main() {
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
         metadata: HashMap::new(),
+        gate_deadline_secs: None,
     });
 
     registry.register(AgentNode {
@@ -77,6 +78,7 @@ async fn main() {
         timeout: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(5),
         metadata: HashMap::new(),
+        gate_deadline_secs: None,
     });
 
     // ── Workflow ───────────────────────────────────────────────────────────

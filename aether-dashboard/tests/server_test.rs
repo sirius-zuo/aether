@@ -53,6 +53,7 @@ async fn start_test_server() -> (Arc<AppState>, u16) {
             "model".to_string(),
             "claude-opus-4-7".to_string(),
         )]),
+        gate_deadline_secs: None,
     });
     let supervisor = Arc::new(Supervisor::with_store(reg, temp_exec_store()));
     let state = AppState::new(Arc::clone(&supervisor));
