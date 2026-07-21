@@ -48,6 +48,8 @@ classDiagram
         +spawn: SpawnPolicy
         +failure: FailurePolicy
         +timeout: Duration
+        +shutdown_grace: Duration
+        +metadata: HashMap~String, String~
     }
     class WorkflowBuilder {
         +entry(node) Self
@@ -102,9 +104,9 @@ classDiagram
     class Outcome {
         <<enum>>
         Success(Value)
-        Failed
-        Timeout
-        Suspended
+        Failed { node, error }
+        Timeout { node }
+        Suspended { workflow_id }
     }
 
     WorkflowBuilder --> AgentRegistry : validates names against

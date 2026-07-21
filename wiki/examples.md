@@ -32,13 +32,11 @@ back.
 - Consumes: [Dashboard](dashboard.md) — `agentverse-pipeline` is the one
   example that mounts it: `aether_dashboard::start` wraps the same
   `Supervisor` (via `AppState::new`) that drives the pipeline.
-- Consumes an **external** agent stack: `llm-planner`'s `Cargo.toml`
-  path-depends on `agentverse`, `agentverse-agent` (feature `http`),
-  `agentverse-hitl`, `agentverse-session`, `agentverse-strategy`, and
-  `agentverse-tools`, all resolved at `../../../agentverse` — a sibling
-  checkout outside this workspace. Only the boundary each example crosses
-  (`Agent::builder`, `LlmRunner`, `HitlPolicy`, `RunStrategy`) is
-  documented here.
+- Consumes an **external** agent stack: `llm-planner` path-depends on
+  `agentverse`, `agentverse-agent` (feature `http`), `agentverse-hitl`,
+  `agentverse-session`, `agentverse-strategy`, `agentverse-tools`, all
+  resolved outside the workspace at `../../../agentverse`. Boundary calls
+  documented: `Agent::builder`, `LlmRunner`, `HitlPolicy`, `RunStrategy`.
 - Consumed by: nothing — both are `[[bin]]` targets with no library crate
   depending on them.
 
@@ -298,13 +296,10 @@ Newest first.
 ## Implementation Notes
 
 - **Build state (verified):** `cargo build -p example-llm-planner -p
-  example-agentverse-pipeline` and `cargo test -p example-llm-planner
-  --test suspend_resume_e2e` both succeed as of this page (against the
-  sibling `agentverse` checkout at `../../../agentverse`). This was
-  **not always true**: commit `829b9ff`'s message states
-  "`example-llm-planner` remains broken only by its pre-existing E0223"
-  (an invalid `ProviderConfig::OpenAI { .. }` struct-variant); commit
-  `2f0ef02` fixed it by switching to `ProviderConfig::openai(..)` in the
+  example-agentverse-pipeline` and `cargo test -p example-llm-planner --test
+  suspend_resume_e2e` both succeed as of this page (against the sibling
+  `agentverse` checkout). This was not always true: commit `2f0ef02` fixed a
+  pre-existing `E0223` (`ProviderConfig::OpenAI { .. }` → `::openai(..)`) in the
   same change that added `suspend_resume_e2e.rs`.
 - **External-crate boundary:** `llm-planner`'s six path dependencies
   resolve outside this workspace (`../../../agentverse/avs-*`); this page

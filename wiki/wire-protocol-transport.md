@@ -75,8 +75,8 @@ classDiagram
     class ApprovalDecision {
         <<enum>>
         Approved
-        Rejected
-        Modified
+        Rejected { reason: Option~String~ }
+        Modified { payload: Value }
     }
     class ResumeRequest {
         +session_id: String
@@ -244,7 +244,9 @@ of the base `Invoke`/`Result`/`Error` exchange.
 - **Consequences:** every agent process — whether or not it ever suspends —
   must expose `/aether/invoke` as an HTTP endpoint reachable from the
   Supervisor; one that uses HITL must also expose `/aether/resume`.
-- **Ref:** 2026-07-18, PR #4 (design doc §2.5, untracked); commit `ef3c864`.
+- **Ref:** 2026-07-18, PR #4 (design doc §2.5, untracked) — the resume
+  transport-boundary decision. The earlier Unix-socket → HTTP switch it builds
+  on landed 2026-05-21, commits `3ace5fe`, `ef3c864`.
 
 ### Agent timeout raised to 300s; `TransportError` carries the failing node name
 - **Decision:** `HttpTransport`'s `reqwest::Client` timeout and the
