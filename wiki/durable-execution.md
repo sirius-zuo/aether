@@ -119,11 +119,12 @@ classDiagram
 
 `ExecutionStore` mirrors `RegistryStore`: `rusqlite` behind
 `Arc<Mutex<Connection>>`, every op via `spawn_blocking`, `CREATE TABLE IF NOT
-EXISTS` in `open()` (no migration crate). `executions` holds one row per run;
+EXISTS` in `open()` (no migration crate). `executions` holds one row per run
+(status, `workflow_spec` for ready-queue rebuild, terminal `result`/`error`);
 `execution_nodes` one row per node with a suspend-correlation group
-(`session_id`, `approval_id`, `kind`, `prompt`, `gate_deadline`) populated only
-while parked and cleared by `complete_node` in the same `UPDATE` that sets
-`status='done'`. `exec_write` funnels single-row writes;
+(`session_id`, `approval_id`, `kind`, `prompt`, `gate_deadline`) populated
+only while parked and cleared by `complete_node` in the same `UPDATE` that
+sets `status='done'`. `exec_write` funnels single-row writes;
 `create_execution`/`expire_gates` use `Connection::transaction` for atomicity.
 
 `RegistryStore` is the equivalent store for live agent instances: `agents`
