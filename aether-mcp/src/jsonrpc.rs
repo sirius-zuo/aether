@@ -176,7 +176,7 @@ async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) 
                 Some(state) => {
                     JsonRpcResponse::result(id, tool_content(serde_json::to_value(state).unwrap()))
                 }
-                None => JsonRpcResponse::result(id, tool_content(json!({ "status": "unknown" }))),
+                None => JsonRpcResponse::error(id, -32001, format!("unknown workflow_id: {raw}")),
             }
         }
         "list_capabilities" => match engine.list_capabilities().await {
@@ -360,5 +360,18 @@ mod tests {
         let resp = handle_request(&engine(), req).await.unwrap();
         let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
         assert!(text.contains("Failed") || text.contains("no such execution"));
+    }
+
+    #[tokio::test]
+    async fn get_result_unknown_id_is_an_error_not_success() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: Some(json!(12)),
+            method: "tools/call".into(),
+            params: json!({ "name": "get_result",
+                            "arguments": { "workflow_id": uuid::Uuid::new_v4().to_string() } }),
+        };
+        let resp = handle_request(&engine(), req).await.unwrap();
+        assert!(resp.result.is_none(), "unknown id must not be a success result");
+        assert_eq!(resp.error.unwrap().code, -32001);
     }
 }
