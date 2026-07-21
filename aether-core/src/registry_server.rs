@@ -74,14 +74,20 @@ async fn register_agent(
         status: RegistryStatus::Unknown,
     };
     match store.register(entry).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "instance_id": instance_id,
-                "poll_interval_secs": poll_interval_secs,
-            })),
-        )
-            .into_response(),
+        Ok(displaced) => {
+            if let Some(old) = displaced {
+                tracing::warn!(displaced_instance_id = %old,
+                    "registration displaced a prior instance sharing this http_url");
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "instance_id": instance_id,
+                    "poll_interval_secs": poll_interval_secs,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

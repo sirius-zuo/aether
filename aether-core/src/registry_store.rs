@@ -93,12 +93,20 @@ impl RegistryStore {
         .expect("open temp registry store")
     }
 
-    pub async fn register(&self, entry: RegistrationEntry) -> Result<(), AetherError> {
+    pub async fn register(&self, entry: RegistrationEntry) -> Result<Option<String>, AetherError> {
         let conn = Arc::clone(&self.conn);
         let caps = serde_json::to_string(&entry.capabilities).unwrap_or_else(|_| "[]".to_string());
         let meta = serde_json::to_string(&entry.metadata).unwrap_or_else(|_| "{}".to_string());
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            // Which prior instance (if any) shares this URL and will be displaced?
+            let displaced: Option<String> = conn
+                .query_row(
+                    "SELECT instance_id FROM agents WHERE http_url = ?1 AND instance_id != ?2",
+                    params![entry.http_url, entry.instance_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
             // Same URL re-registration: remove old row first
             conn.execute(
                 "DELETE FROM agents WHERE http_url = ?1 AND instance_id != ?2",
@@ -118,14 +126,14 @@ impl RegistryStore {
                     entry.registered_at
                 ],
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+            Ok::<Option<String>, String>(displaced)
         })
         .await
         .map_err(|e| AetherError::RegistryError {
             message: e.to_string(),
         })?
-        .map_err(|e| AetherError::RegistryError { message: e })?;
-        Ok(())
+        .map_err(|e| AetherError::RegistryError { message: e })
     }
 
     pub async fn deregister(&self, instance_id: &str) -> Result<bool, AetherError> {
@@ -392,5 +400,19 @@ mod tests {
         let calcs = store.list_by_name("calc").await.unwrap();
         assert_eq!(calcs.len(), 1);
         assert_eq!(calcs[0].instance_id, "a1");
+    }
+
+    #[tokio::test]
+    async fn register_returns_displaced_instance_id() {
+        let store = RegistryStore::open_temp();
+        let url = "http://127.0.0.1:9500";
+        let mk = |iid: &str| RegistrationEntry {
+            instance_id: iid.into(), name: "a".into(), http_url: url.into(),
+            capabilities: vec![], metadata: HashMap::new(),
+            registered_at: "2026-05-21T00:00:00Z".into(),
+            last_health_check: None, status: RegistryStatus::Unknown,
+        };
+        assert_eq!(store.register(mk("old-id")).await.unwrap(), None);
+        assert_eq!(store.register(mk("new-id")).await.unwrap(), Some("old-id".to_string()));
     }
 }
