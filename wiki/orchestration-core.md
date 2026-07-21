@@ -85,6 +85,7 @@ classDiagram
         +depends_on: Vec~String~
         +instruction: Option~String~
         +metadata: HashMap
+        +gate_deadline_secs: Option~u64~
     }
     class Orchestrator {
         +submit(goal) Outcome
@@ -180,7 +181,8 @@ MCP server).**
    `RegistryStore` and sends `goal` to that planner agent over `HttpTransport`.
 2. `dag_from_planner_result` extracts the JSON object embedded in the planner's
    `{"output": "..."}` text (tolerating markdown fences or surrounding prose by
-   slicing from the first `{` to the last `}`), and `DagSpec::parse` /
+   parsing the first complete JSON object starting at the first `{` via a
+   streaming `serde_json::Deserializer`), and `DagSpec::parse` /
    `DagSpec::validate` turn it into a `DagSpec`.
 3. `build_registry_and_workflow` resolves every `DagNode` against the
    `RegistryStore`, producing a fresh `AgentRegistry` and a `Workflow` whose
@@ -321,19 +323,23 @@ MCP server).**
   doc comment states this "assumes unconditional edges (see Global
   Constraints — predicates are not persisted)." A recovered run silently loses
   any `Edge::when` predicate that would have gated a node.
-- **Known debt (labeled in `Orchestrator::recoverable`/`recover` doc comments):**
-  recovery is explicitly "never automatic" and has a documented
-  no-concurrent-driver precondition — calling `Orchestrator::recover` on an
-  execution that still has a live `submit` driving it starts a second `drive`
-  loop over the same rows, causing duplicate dispatch and interleaved
-  checkpoints. There is no code-level guard against this; it is operator
-  discipline enforced only by doc comments.
-- **Gotcha:** `dag_from_planner_result` slices from the first `{` to the last
-  `}` in the planner's `output` text to tolerate markdown fences or prose
-  around the JSON. This is a best-effort extraction, not a strict parser — a
-  planner emitting multiple JSON-looking braces in prose could produce a
-  malformed slice that then fails `DagSpec::parse` downstream (or worse, an
-  unintended object) rather than a clear "not JSON" error at this stage.
+- **Invariant:** the no-concurrent-driver precondition is now enforced by a DB
+  lease, not just doc comments — every `executions` row carries
+  `claimed_by`/`lease_expiry`, and `Supervisor::claim_or_refuse` claims the row
+  via `ExecutionStore::claim_execution` before driving it. Calling
+  `Orchestrator::recover` (or `submit`/`resume_execution`) on an execution a
+  live driver still holds fails fast with `Outcome::Failed` instead of
+  starting a second `drive` loop over the same rows. See
+  [Durable Execution](durable-execution.md)'s "No-concurrent-driver guard is a
+  DB lease" decision for the full mechanics.
+- **Gotcha:** `dag_from_planner_result` finds the first `{` in the planner's
+  `output` text, then parses the first complete JSON value from that point via
+  a streaming `serde_json::Deserializer`, succeeding only if that value is a
+  JSON object; any trailing prose after the object's closing `}` is ignored.
+  This is stricter than the old first-`{`..last-`}` slice: a planner emitting
+  a non-JSON `{` before the real object (e.g. `note {not json} then
+  {"nodes":[]}`) now fails with a clear "not a valid JSON object" error
+  instead of matching ahead to an unrelated closing brace.
 
 ## Source Anchors
 
