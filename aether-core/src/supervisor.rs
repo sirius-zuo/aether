@@ -231,6 +231,7 @@ impl Supervisor {
             let _ = self.store.renew_lease(&wid, &self.driver_id, &exp).await;
 
             let mut join_set: JoinSet<TaskResult> = JoinSet::new();
+            let mut candidates: Vec<String> = Vec::new();
 
             for (node_name, payload) in ready.drain(..) {
                 let sup_registry = self.registry.clone();
@@ -362,10 +363,32 @@ impl Supervisor {
                 }
 
                 for (_from, to) in fired_edges {
-                    match self.node_ready_input(workflow, &wid, &to).await {
-                        Ok(Some(input)) => ready.push((to, input)),
-                        Ok(None) => {}
-                        Err(e) => return self.fail_execution(&wid, &e).await,
+                    candidates.push(to);
+                }
+            }
+
+            if !candidates.is_empty() {
+                candidates.sort();
+                candidates.dedup();
+                // A readiness-load failure marks the execution Failed (matching the
+                // pre-refactor per-edge path) rather than propagating a bare Err.
+                let (_exec, nodes) = match self.store.load_execution(&wid).await {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => {
+                        return self
+                            .fail_execution(
+                                &wid,
+                                &AetherError::WorkflowError {
+                                    message: "execution vanished".into(),
+                                },
+                            )
+                            .await
+                    }
+                    Err(e) => return self.fail_execution(&wid, &e).await,
+                };
+                for to in candidates {
+                    if let Some(input) = ready_input_from_snapshot(workflow, &nodes, &to) {
+                        ready.push((to, input));
                     }
                 }
             }
@@ -383,52 +406,14 @@ impl Supervisor {
         wid: &str,
         to: &str,
     ) -> Result<Option<serde_json::Value>, AetherError> {
-        let (_exec, nodes) =
-            self.store
-                .load_execution(wid)
-                .await?
-                .ok_or_else(|| AetherError::WorkflowError {
-                    message: "execution vanished".into(),
-                })?;
-        let status = |id: &str| {
-            nodes
-                .iter()
-                .find(|n| n.node_id == id)
-                .map(|n| n.status.clone())
-        };
-        let output = |id: &str| {
-            nodes
-                .iter()
-                .find(|n| n.node_id == id)
-                .and_then(|n| n.output.as_ref())
-                .map(|s| {
-                    serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null)
-                })
-                .unwrap_or(serde_json::Value::Null)
-        };
-
-        if status(to) != Some(crate::NodeStatus::Pending) {
-            return Ok(None);
-        }
-        let deps: Vec<String> = workflow
-            .incoming(to)
-            .iter()
-            .map(|e| e.from.clone())
-            .collect();
-        if !deps
-            .iter()
-            .all(|d| status(d) == Some(crate::NodeStatus::Done))
-        {
-            return Ok(None);
-        }
-        let input = if deps.len() == 1 {
-            output(&deps[0])
-        } else {
-            let map: serde_json::Map<String, serde_json::Value> =
-                deps.iter().map(|d| (d.clone(), output(d))).collect();
-            serde_json::Value::Object(map)
-        };
-        Ok(Some(input))
+        let (_exec, nodes) = self
+            .store
+            .load_execution(wid)
+            .await?
+            .ok_or_else(|| AetherError::WorkflowError {
+                message: "execution vanished".into(),
+            })?;
+        Ok(ready_input_from_snapshot(workflow, &nodes, to))
     }
 
     /// Called when `ready` drains: succeed if nothing is parked, else suspend.
@@ -817,6 +802,37 @@ impl Supervisor {
             .finish_execution(wid, crate::ExecutionStatus::Failed, None, Some(&error))
             .await;
         Ok(Outcome::Failed { node, error })
+    }
+}
+
+/// Pure readiness check against a single loaded node snapshot: `Some(input)` if
+/// `to` is still `Pending` and all its deps are `Done`; single dep → that dep's
+/// output, multiple deps → a named map keyed by source node id.
+fn ready_input_from_snapshot(
+    workflow: &Workflow,
+    nodes: &[crate::ExecutionNodeRecord],
+    to: &str,
+) -> Option<serde_json::Value> {
+    let status = |id: &str| nodes.iter().find(|n| n.node_id == id).map(|n| n.status.clone());
+    let output = |id: &str| {
+        nodes.iter().find(|n| n.node_id == id)
+            .and_then(|n| n.output.as_ref())
+            .map(|s| serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null)
+    };
+    if status(to) != Some(crate::NodeStatus::Pending) {
+        return None;
+    }
+    let deps: Vec<String> = workflow.incoming(to).iter().map(|e| e.from.clone()).collect();
+    if !deps.iter().all(|d| status(d) == Some(crate::NodeStatus::Done)) {
+        return None;
+    }
+    if deps.len() == 1 {
+        Some(output(&deps[0]))
+    } else {
+        let map: serde_json::Map<String, serde_json::Value> =
+            deps.iter().map(|d| (d.clone(), output(d))).collect();
+        Some(serde_json::Value::Object(map))
     }
 }
 

@@ -85,6 +85,20 @@ fn tool_descriptors() -> Value {
             "description": "Operator sweep: fail any parked node whose gate deadline has passed. Returns the expired (workflow_id, node_id) pairs.",
             "inputSchema": { "type": "object", "properties": {} }
         }
+        ,{
+            "name": "list_recoverable",
+            "description": "List executions (running/suspended) an operator may recover after a restart.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "recover_workflow",
+            "description": "Recover one execution by workflow_id (re-drives a crash/restart orphan). Refused if a live driver holds it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "workflow_id": { "type": "string" } },
+                "required": ["workflow_id"]
+            }
+        }
     ])
 }
 
@@ -162,7 +176,7 @@ async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) 
                 Some(state) => {
                     JsonRpcResponse::result(id, tool_content(serde_json::to_value(state).unwrap()))
                 }
-                None => JsonRpcResponse::result(id, tool_content(json!({ "status": "unknown" }))),
+                None => JsonRpcResponse::error(id, -32001, format!("unknown workflow_id: {raw}")),
             }
         }
         "list_capabilities" => match engine.list_capabilities().await {
@@ -179,6 +193,25 @@ async fn handle_tool_call(engine: &McpEngine, id: Option<Value>, params: Value) 
             }
             Err(e) => JsonRpcResponse::error(id, -32000, e.to_string()),
         },
+        "list_recoverable" => match engine.recoverable().await {
+            Ok(recs) => {
+                let list: Vec<Value> = recs
+                    .into_iter()
+                    .map(|r| json!({ "workflow_id": r.workflow_id, "status": r.status.as_str() }))
+                    .collect();
+                JsonRpcResponse::result(id, tool_content(json!({ "recoverable": list })))
+            }
+            Err(e) => JsonRpcResponse::error(id, -32000, e.to_string()),
+        },
+        "recover_workflow" => {
+            let raw = args.get("workflow_id").and_then(Value::as_str).unwrap_or_default();
+            let parsed = match uuid::Uuid::parse_str(raw) {
+                Ok(u) => u,
+                Err(_) => return JsonRpcResponse::error(id, -32602, "invalid 'workflow_id'"),
+            };
+            let outcome = engine.recover(parsed).await;
+            JsonRpcResponse::result(id, tool_content(serde_json::to_value(outcome).unwrap()))
+        }
         other => JsonRpcResponse::error(id, -32602, format!("unknown tool: {other}")),
     }
 }
@@ -301,5 +334,44 @@ mod tests {
         let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["expired"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn tools_call_list_recoverable_returns_empty_on_fresh_store() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: Some(json!(10)),
+            method: "tools/call".into(),
+            params: json!({ "name": "list_recoverable", "arguments": {} }),
+        };
+        let resp = handle_request(&engine(), req).await.unwrap();
+        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["recoverable"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn tools_call_recover_workflow_unknown_id_reports_failure() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: Some(json!(11)),
+            method: "tools/call".into(),
+            params: json!({ "name": "recover_workflow",
+                            "arguments": { "workflow_id": uuid::Uuid::new_v4().to_string() } }),
+        };
+        let resp = handle_request(&engine(), req).await.unwrap();
+        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("Failed") || text.contains("no such execution"));
+    }
+
+    #[tokio::test]
+    async fn get_result_unknown_id_is_an_error_not_success() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(), id: Some(json!(12)),
+            method: "tools/call".into(),
+            params: json!({ "name": "get_result",
+                            "arguments": { "workflow_id": uuid::Uuid::new_v4().to_string() } }),
+        };
+        let resp = handle_request(&engine(), req).await.unwrap();
+        assert!(resp.result.is_none(), "unknown id must not be a success result");
+        assert_eq!(resp.error.unwrap().code, -32001);
     }
 }

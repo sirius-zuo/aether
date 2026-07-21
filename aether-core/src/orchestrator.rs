@@ -123,8 +123,8 @@ async fn build_registry_and_workflow(
 
 /// The planner runs on the built-in server, so its `Done` result is
 /// `{"output": "<dag json text>"}`. Pull the JSON object out of that text
-/// (tolerating markdown fences or surrounding prose by slicing first `{` ..
-/// last `}`) so `DagSpec::parse` receives the DAG object.
+/// (tolerating markdown fences or surrounding prose by parsing the first
+/// complete JSON object) so `DagSpec::parse` receives the DAG object.
 fn dag_from_planner_result(payload: &serde_json::Value) -> Result<serde_json::Value, AetherError> {
     let text = payload
         .get("output")
@@ -132,19 +132,18 @@ fn dag_from_planner_result(payload: &serde_json::Value) -> Result<serde_json::Va
         .ok_or_else(|| AetherError::WorkflowError {
             message: "planner result missing string `output` field".to_string(),
         })?;
-    let start = text.find('{');
-    let end = text.rfind('}');
-    let (start, end) = match (start, end) {
-        (Some(s), Some(e)) if e >= s => (s, e),
-        _ => {
-            return Err(AetherError::WorkflowError {
-                message: format!("planner output has no JSON object: {text}"),
-            })
-        }
-    };
-    serde_json::from_str(&text[start..=end]).map_err(|e| AetherError::WorkflowError {
-        message: format!("planner output is not valid JSON: {e}"),
-    })
+    let start = text.find('{').ok_or_else(|| AetherError::WorkflowError {
+        message: format!("planner output has no JSON object: {text}"),
+    })?;
+    // Parse the FIRST complete JSON value starting at '{'; trailing prose is ignored.
+    let mut stream =
+        serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+    match stream.next() {
+        Some(Ok(v)) if v.is_object() => Ok(v),
+        _ => Err(AetherError::WorkflowError {
+            message: format!("planner output is not a valid JSON object: {text}"),
+        }),
+    }
 }
 
 /// LLM-free coordinator: goal -> planner agent -> DAG -> execute on the Supervisor.
@@ -614,6 +613,21 @@ mod tests {
         let orch = Orchestrator::new(store, ExecutionStore::open_temp());
         let caps = orch.list_capabilities().await.unwrap();
         assert_eq!(caps, vec!["research".to_string(), "write".to_string()]);
+    }
+
+    #[test]
+    fn dag_from_planner_tolerates_trailing_prose_after_object() {
+        use serde_json::json;
+        let resp = json!({ "output": "Here is your DAG:\n{\"nodes\":[]}\nThanks!" });
+        assert_eq!(super::dag_from_planner_result(&resp).unwrap(), json!({ "nodes": [] }));
+    }
+
+    #[test]
+    fn dag_from_planner_errors_when_first_object_is_invalid() {
+        use serde_json::json;
+        // The first '{' does not begin a valid JSON object.
+        let resp = json!({ "output": "note {not json} then {\"nodes\":[]}" });
+        assert!(super::dag_from_planner_result(&resp).is_err());
     }
 
     #[test]
