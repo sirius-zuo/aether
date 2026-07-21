@@ -4,8 +4,9 @@
 
 This is the contract every agent process speaks to Aether, and the HTTP
 mechanics that carry it. `Envelope` is the sole message shape crossing the
-process boundary — `Invoke` in, `Result`/`Error`/`Suspended` back — framed as
-newline-delimited JSON in the wire-protocol spec. `Transport` and
+process boundary — `Invoke` in, `Result`/`Error`/`Suspended` back — carried
+as a whole-body JSON document over HTTP (the original wire-protocol spec
+framed it as newline-delimited JSON, since retired). `Transport` and
 `AgentFactory` are the traits that abstract "reach an agent process";
 `HttpTransport`/`HttpAgentFactory` are their only current implementation,
 POSTing `Envelope`s to an agent's `/aether/invoke` and `/aether/resume`
