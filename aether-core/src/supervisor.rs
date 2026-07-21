@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 type TaskResult = Result<(String, Envelope, Vec<(String, String)>), AetherError>;
 
+/// Driver lease duration. Renewed at the top of each BFS level so long runs
+/// don't self-expire; a crashed driver's lease lapses after this.
+const LEASE_SECS: i64 = 300;
+
 fn serialize_duration_ms<S: serde::Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_u64(d.as_millis() as u64)
 }
@@ -68,6 +72,7 @@ pub struct Supervisor {
     instance_manager: Arc<InstanceManager>,
     event_tx: broadcast::Sender<SupervisorEvent>,
     store: crate::ExecutionStore,
+    driver_id: String,
 }
 
 impl Supervisor {
@@ -78,6 +83,25 @@ impl Supervisor {
             instance_manager: Arc::new(InstanceManager::new()),
             event_tx,
             store,
+            driver_id: Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn lease_window(&self) -> (String, String) {
+        let now = Utc::now();
+        (now.to_rfc3339(), (now + chrono::Duration::seconds(LEASE_SECS)).to_rfc3339())
+    }
+
+    /// Claim `wid` for this driver; returns an "already being driven" Outcome on refusal.
+    async fn claim_or_refuse(&self, wid: &str) -> Result<(), Outcome> {
+        let (now, exp) = self.lease_window();
+        match self.store.claim_execution(wid, &self.driver_id, &now, &exp).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Outcome::Failed {
+                node: String::new(),
+                error: format!("execution '{wid}' is already being driven by another driver"),
+            }),
+            Err(e) => Err(Outcome::Failed { node: String::new(), error: e.to_string() }),
         }
     }
 
@@ -156,6 +180,10 @@ impl Supervisor {
             };
         }
 
+        if let Err(o) = self.claim_or_refuse(&workflow_id.to_string()).await {
+            return o;
+        }
+
         let ready: Vec<(String, serde_json::Value)> = workflow
             .entries
             .iter()
@@ -169,6 +197,11 @@ impl Supervisor {
                 error: e.to_string(),
             },
         };
+
+        let _ = self
+            .store
+            .release_execution(&workflow_id.to_string(), &self.driver_id)
+            .await;
 
         let _ = self.event_tx.send(SupervisorEvent::WorkflowFinished {
             workflow_id,
@@ -187,6 +220,9 @@ impl Supervisor {
         let wid = workflow_id.to_string();
 
         while !ready.is_empty() {
+            let (_now, exp) = self.lease_window();
+            let _ = self.store.renew_lease(&wid, &self.driver_id, &exp).await;
+
             let mut join_set: JoinSet<TaskResult> = JoinSet::new();
 
             for (node_name, payload) in ready.drain(..) {
@@ -450,6 +486,24 @@ impl Supervisor {
         decision: crate::ApprovalDecision,
     ) -> Outcome {
         let wid = workflow_id.to_string();
+        if let Err(o) = self.claim_or_refuse(&wid).await {
+            return o;
+        }
+        let outcome = self
+            .resume_execution_inner(workflow_id, workflow, node_id, decision)
+            .await;
+        let _ = self.store.release_execution(&wid, &self.driver_id).await;
+        outcome
+    }
+
+    async fn resume_execution_inner(
+        &self,
+        workflow_id: Uuid,
+        workflow: &Workflow,
+        node_id: &str,
+        decision: crate::ApprovalDecision,
+    ) -> Outcome {
+        let wid = workflow_id.to_string();
 
         let node_rec = match self.store.load_execution(&wid).await {
             Ok(Some((_e, nodes))) => nodes.into_iter().find(|n| n.node_id == node_id),
@@ -639,6 +693,16 @@ impl Supervisor {
     /// parked nodes stay parked. Assumes unconditional edges (see Global
     /// Constraints — predicates are not persisted).
     pub async fn recover(&self, workflow: &Workflow, workflow_id: Uuid) -> Outcome {
+        let wid = workflow_id.to_string();
+        if let Err(o) = self.claim_or_refuse(&wid).await {
+            return o;
+        }
+        let outcome = self.recover_inner(workflow, workflow_id).await;
+        let _ = self.store.release_execution(&wid, &self.driver_id).await;
+        outcome
+    }
+
+    async fn recover_inner(&self, workflow: &Workflow, workflow_id: Uuid) -> Outcome {
         let wid = workflow_id.to_string();
         let (exec, nodes) = match self.store.load_execution(&wid).await {
             Ok(Some(v)) => v,
@@ -1399,5 +1463,42 @@ mod tests {
             .unwrap();
         assert_eq!(exec.status, crate::ExecutionStatus::Succeeded);
         assert!(nodes.iter().find(|n| n.node_id == "b").unwrap().status == crate::NodeStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn recover_refused_when_execution_is_claimed_by_a_live_driver() {
+        let store = crate::ExecutionStore::open_temp();
+        let wid = Uuid::new_v4();
+        let r = reg(&["a", "b"]);
+        let wf = Workflow::builder(&r).edge("a", "b").build().unwrap();
+        store.create_execution(&wid.to_string(), "{}", "{}", &["a".into(), "b".into()])
+            .await.unwrap();
+        store.complete_node(&wid.to_string(), "a", r#"{"v":1}"#).await.unwrap();
+
+        // A foreign driver holds a live (future) lease.
+        let now = chrono::Utc::now().to_rfc3339();
+        let far = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+        assert!(store.claim_execution(&wid.to_string(), "foreign", &now, &far).await.unwrap());
+
+        let sup = Supervisor::with_store(r, store.clone());
+        let outcome = sup.recover(&wf, wid).await;
+        match outcome {
+            Outcome::Failed { error, .. } => assert!(error.contains("already being driven")),
+            other => panic!("expected refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_run_releases_its_claim() {
+        let r = reg(&["only"]);
+        let wf = Workflow { entries: vec!["only".into()], edges: vec![] };
+        let store = crate::ExecutionStore::open_temp();
+        let sup = Supervisor::with_store(r, store.clone());
+        let wid = Uuid::new_v4();
+        assert!(matches!(sup.run_with_id(wid, &wf, serde_json::json!({"m":1})).await, Outcome::Success(_)));
+        // Claim released → a fresh driver can claim the (now-completed) row.
+        let now = chrono::Utc::now().to_rfc3339();
+        let exp = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        assert!(store.claim_execution(&wid.to_string(), "fresh", &now, &exp).await.unwrap());
     }
 }
