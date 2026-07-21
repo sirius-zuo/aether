@@ -98,6 +98,7 @@ async fn start_suspending_server() -> String {
                     approval_id: "appr-1".to_string(),
                     kind: "phase_gate".to_string(),
                     prompt: "approve?".to_string(),
+                    gate_deadline: None,
                 })
                 .unwrap();
                 (
