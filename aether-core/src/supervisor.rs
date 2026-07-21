@@ -118,7 +118,14 @@ impl Supervisor {
     /// Effective gate deadline for a parking node: agent-supplied absolute
     /// deadline wins; else the node's `gate_deadline_secs` default (now + secs).
     fn effective_gate_deadline(&self, node_name: &str, sp: &crate::SuspendPayload) -> Option<String> {
-        sp.gate_deadline.clone().or_else(|| {
+        sp.gate_deadline
+            .as_deref()
+            .map(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+                    .unwrap_or_else(|_| s.to_string())
+            })
+            .or_else(|| {
             self.registry
                 .get(node_name)
                 .and_then(|n| n.gate_deadline_secs)
@@ -1272,6 +1279,53 @@ mod tests {
         let (_e, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
         let gate = nodes.iter().find(|n| n.node_id == "gate").unwrap();
         assert_eq!(gate.gate_deadline.as_deref(), Some("2099-01-01T00:00:00+00:00"));
+    }
+
+    #[tokio::test]
+    async fn park_stamps_agent_deadline_normalized_to_utc() {
+        // Agent supplies a non-UTC offset; it must be stamped UTC-normalized
+        // so lexical string comparisons (e.g. ExecutionStore::expire_gates)
+        // against Utc::now().to_rfc3339() behave correctly.
+        struct NonUtcDeadlineSuspendTransport;
+        #[async_trait]
+        impl Transport for NonUtcDeadlineSuspendTransport {
+            async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError> {
+                Ok(Envelope {
+                    kind: EnvelopeKind::Suspended,
+                    payload: serde_json::json!({
+                        "session_id": "s1", "approval_id": "a1", "kind": "phase_gate",
+                        "prompt": "ok?", "gate_deadline": "2026-07-21T09:00:00+09:00"
+                    }),
+                    ..msg
+                })
+            }
+            async fn shutdown(&self, _: Duration) {}
+        }
+        struct F;
+        #[async_trait]
+        impl AgentFactory for F {
+            async fn create(&self) -> Result<Arc<dyn Transport>, AetherError> {
+                Ok(Arc::new(NonUtcDeadlineSuspendTransport))
+            }
+        }
+        let r = AgentRegistry::new();
+        r.register(AgentNode {
+            name: "gate".into(), capabilities: vec![], factory: Arc::new(F),
+            spawn: SpawnPolicy::PerRequest, failure: FailurePolicy::default(),
+            timeout: Duration::from_secs(5), shutdown_grace: Duration::from_secs(1),
+            metadata: HashMap::new(), gate_deadline_secs: Some(30),
+        });
+        let wf = Workflow::builder(&r).entry("gate").build().unwrap();
+        let store = crate::ExecutionStore::open_temp();
+        let sup = Supervisor::with_store(r, store.clone());
+        let wid = uuid::Uuid::new_v4();
+        sup.run_with_id(wid, &wf, serde_json::json!({"m": 1})).await;
+        let (_e, nodes) = store.load_execution(&wid.to_string()).await.unwrap().unwrap();
+        let gate = nodes.iter().find(|n| n.node_id == "gate").unwrap();
+        let stamped = gate.gate_deadline.as_deref().expect("deadline stamped");
+        assert_eq!(stamped, "2026-07-21T00:00:00+00:00");
+        let parsed = chrono::DateTime::parse_from_rfc3339(stamped).unwrap();
+        assert_eq!(parsed.offset().local_minus_utc(), 0, "stamped offset must be UTC");
     }
 
     #[tokio::test]
