@@ -12,23 +12,27 @@ Complete guide for building, testing, and extending Aether workflows.
 - [Building Workflows](#building-workflows)
 - [SpawnPolicy and FailurePolicy](#spawnpolicy-and-failurepolicy)
 - [Supervision and Events](#supervision-and-events)
+- [Durable Execution, Suspension & Recovery](#durable-execution-suspension--recovery)
 - [Dashboard](#dashboard)
 - [Connecting HTTP Agents](#connecting-http-agents)
 - [Testing Strategies](#testing-strategies)
 - [Debugging & Observability](#debugging--observability)
+- [LLM Planning & Orchestration](#llm-planning--orchestration)
 - [Quick Reference](#quick-reference)
 
 ---
 
 ## Architecture Overview
 
-Aether is a Cargo workspace with two crates and one standalone binary:
+Aether is a Cargo workspace with three library crates, one standalone registry binary, and two example crates:
 
 ```
 aether/
-├── aether-core/             # DAG engine, HTTP transport, registry, supervisor
+├── aether-core/             # DAG engine, HTTP transport, registry, supervisor, durable execution store
 │   └── bin/aether           # Standalone agent registry server
-└── aether-dashboard/        # Embedded axum server, SSE event stream, Mermaid.js UI
+├── aether-dashboard/        # Embedded axum server, SSE event stream, Mermaid.js UI
+├── aether-mcp/               # MCP (JSON-RPC 2.0) sidecar exposing goal dispatch + recovery over stdio/HTTP
+└── examples/                 # agentverse-pipeline, llm-planner
 ```
 
 **Separation of concerns:**
@@ -36,18 +40,21 @@ aether/
 | Component | Crate | Responsibility |
 |-----------|-------|----------------|
 | `Envelope` / codec | `aether-core` | Wire protocol — serialize/deserialize JSON lines |
-| `Transport` / `AgentFactory` | `aether-core` | Trait abstractions for agent communication |
-| `HttpTransport` | `aether-core` | POST `/aether/invoke`; one `reqwest::Client` per transport |
+| `Transport` / `AgentFactory` | `aether-core` | Trait abstractions for agent communication (`send` + `resume`) |
+| `HttpTransport` | `aether-core` | POST `/aether/invoke`, `/aether/resume`; one `reqwest::Client` per transport |
 | `AgentRegistry` | `aether-core` | Named node definitions, capability lookup |
 | `InstanceManager` | `aether-core` | Live connection handles — Singleton/Pool/PerRequest lifecycle |
-| `Supervisor` | `aether-core` | BFS DAG executor, FailurePolicy, event broadcast |
+| `Supervisor` | `aether-core` | BFS DAG executor, FailurePolicy, suspend/resume/recover, event broadcast |
+| `ExecutionStore` | `aether-core` | SQLite-backed durable checkpoints, gate-deadline expiry, driver claim/lease |
+| `Orchestrator` | `aether-core` | LLM-free goal → planner → DAG coordinator; owns `RegistryStore` + `ExecutionStore` |
 | `RegistryStore` | `aether-core` | SQLite-backed persistent store for agent registrations |
 | `registry_server` | `aether-core` | axum router exposing the agent self-registration REST API |
 | `HealthPoller` | `aether-core` | Background task polling `GET /health` on registered agents |
 | `AppState` / `TokenAccumulator` | `aether-dashboard` | Per-node token stats accumulated from events |
 | `server` / handlers | `aether-dashboard` | axum router, SSE stream, REST endpoints, Bearer auth |
+| `McpEngine` / `jsonrpc` | `aether-mcp` | Bridges MCP tool calls to the `Orchestrator` |
 
-**Aether and agents are completely independent.** Aether has no knowledge of agent internals; agents have no knowledge of Aether internals. The only contract is the Envelope wire protocol — agents expose `POST /aether/invoke` and `GET /health`.
+**Aether and agents are completely independent.** Aether has no knowledge of agent internals; agents have no knowledge of Aether internals. The contract is the Envelope wire protocol — agents expose `POST /aether/invoke`, `GET /health`, and (only if they support human-in-the-loop suspension) `POST /aether/resume`.
 
 ---
 
@@ -85,15 +92,20 @@ cargo fmt --all
 
 ### Running the echo-agent test helper
 
-`aether-core` ships a minimal `echo-agent` binary that echoes every `Invoke` as `Result` and responds to `Ping` with `Pong`. It is useful for manual end-to-end debugging without a real LLM.
+`aether-core` ships a minimal `echo-agent` binary — a real HTTP agent (not a stdin/stdout pipe) that serves `POST /aether/invoke` (echoes the `input` field back as `{"output": ...}`) and `GET /health`. It binds `AGENT_PORT` (default `0`, i.e. an OS-assigned port) on `127.0.0.1` and prints the bound port to stdout. Useful for manual end-to-end debugging without a real LLM.
 
 ```bash
 cargo build -p aether-core
 
-# Manual test — send a Ping, expect a Pong
-echo '{"id":"00000000-0000-0000-0000-000000000001","kind":"ping","payload":null,"metadata":{}}' \
-  | ./target/debug/echo-agent
-# → {"id":"00000000-...","kind":"pong","payload":null,"metadata":{}}
+AGENT_PORT=8080 ./target/debug/echo-agent &
+
+curl -s -X POST http://127.0.0.1:8080/aether/invoke \
+  -H 'content-type: application/json' \
+  -d '{"id":"00000000-0000-0000-0000-000000000001","kind":"invoke","payload":{"input":"hi"},"metadata":{}}'
+# → {"id":"00000000-...","kind":"result","payload":{"output":"hi"},"metadata":{}}
+
+curl -s http://127.0.0.1:8080/health
+# → {"status":"healthy"}
 ```
 
 ### Running the registry server
@@ -120,15 +132,15 @@ The unit of communication. Every agent call is an `Envelope` round-trip.
 ```rust
 pub struct Envelope {
     pub id: Uuid,                          // correlation id — matched on return
-    pub kind: EnvelopeKind,               // Invoke / Result / Error / Ping / Pong
+    pub kind: EnvelopeKind,               // Invoke / Result / Error / Suspended
     pub payload: serde_json::Value,        // task input or output
     pub metadata: HashMap<String, String>, // trace_id, model, tokens_*, etc.
 }
 ```
 
-`Envelope::invoke(payload, metadata)` is the primary constructor. `Envelope::ping(id)` creates a health-check envelope with the same id.
+`Envelope::invoke(payload, metadata)` is the primary constructor. There is no envelope-level ping/pong — liveness is a plain HTTP `GET /health` (see [HealthPoller](#aether-registry-binary)).
 
-**Codec:** `write_envelope` serializes to JSON + `\n` and flushes. `read_envelope` reads one line and deserializes; returns `None` on EOF. Both are async and work with any `tokio::io` reader/writer.
+`payload_text(&Value) -> String` (in `envelope.rs`) flattens an arbitrary node-input payload — the initial goal (`{"goal": …}`), a prior agent's result (`{"output": …}`), a fan-in map, a bare string, or an array — into the plain text the AgentVerse built-in server reads from `payload.input`. `HttpTransport::send` uses it to build the outbound wire payload.
 
 ### AetherError
 
@@ -147,12 +159,13 @@ pub enum AetherError {
 ```rust
 pub enum Outcome {
     Success(serde_json::Value),
-    Failed  { node: String, error: String },
-    Timeout { node: String },
+    Failed    { node: String, error: String },
+    Timeout   { node: String },
+    Suspended { workflow_id: Uuid },
 }
 ```
 
-Returned by `Supervisor::run`. `Success` carries the final node's result payload.
+Returned by `Supervisor::run`. `Success` carries the final node's result payload; `Suspended` means a node parked for a human decision — see [Durable Execution, Suspension & Recovery](#durable-execution-suspension--recovery).
 
 ---
 
@@ -164,11 +177,17 @@ Returned by `Supervisor::run`. `Success` carries the final node's result payload
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn send(&self, msg: Envelope) -> Result<Envelope, AetherError>;
+
+    /// Deliver a human decision to a suspended agent. Default: unsupported.
+    async fn resume(&self, req: ResumeRequest) -> Result<Envelope, AetherError> {
+        Err(AetherError::TransportError { .. })
+    }
+
     async fn shutdown(&self, grace: Duration);
 }
 ```
 
-`send` is a full round-trip: POST the envelope, block until the HTTP response arrives, deserialize the response envelope.
+`send` is a full round-trip: POST the envelope, block until the HTTP response arrives, deserialize the response envelope. `resume` has a default implementation that errors — a transport only needs to override it if the agent behind it supports suspension.
 
 ### AgentFactory trait
 
@@ -183,7 +202,7 @@ pub trait AgentFactory: Send + Sync {
 
 ### HttpTransport / HttpAgentFactory
 
-The only built-in transport. Posts envelopes to an HTTP agent's `/aether/invoke` endpoint.
+The only built-in transport. Posts envelopes to an HTTP agent's `/aether/invoke` endpoint, and resume decisions to `/aether/resume`.
 
 ```rust
 HttpAgentFactory {
@@ -196,10 +215,11 @@ The agent must expose:
 
 ```
 POST /aether/invoke   — accepts Envelope JSON body, returns Envelope JSON
+POST /aether/resume   — accepts ResumeRequest JSON body, returns Envelope JSON (only if the agent supports suspension)
 GET  /health          — returns any 2xx to signal healthy
 ```
 
-`HttpTransport` is created with a `reqwest::Client` that has a 60-second timeout. `shutdown` is a no-op — Aether does not own the agent process.
+`HttpTransport` is created with a `reqwest::Client` that has a 300-second timeout. `shutdown` is a no-op — Aether does not own the agent process.
 
 ### Writing a custom Transport
 
@@ -414,7 +434,8 @@ failure: FailurePolicy {
 ### Running a workflow
 
 ```rust
-let supervisor = Arc::new(Supervisor::new(registry));
+let store = ExecutionStore::open("aether.db")?;
+let supervisor = Arc::new(Supervisor::with_store(registry, store));
 let outcome = supervisor.run(&workflow, initial_payload).await;
 ```
 
@@ -450,7 +471,97 @@ tokio::spawn(async move {
 | `TaskCompleted` | `workflow_id`, `node`, `elapsed` | Result received |
 | `TaskFailed` | `workflow_id`, `node`, `error`, `attempt` | Error received or timeout |
 | `AgentRestarted` | `node`, `reason` | Transport recreated via FailurePolicy |
-| `AgentHealthCheck` | `node`, `status` | Ping/Pong health probe result |
+| `AgentHealthCheck` | `node`, `status` | `HealthStatus` probe result (`Healthy` / `Degraded` / `Unreachable`) |
+| `NodeSuspended` | `workflow_id`, `node`, `session_id`, `approval_id`, `kind`, `prompt` | Node returned `EnvelopeKind::Suspended` and was parked |
+
+---
+
+## Durable Execution, Suspension & Recovery
+
+`Supervisor` no longer holds run state only in memory — every execution and every node transition is checkpointed through an `ExecutionStore` (`aether-core/src/execution_store.rs`, SQLite-backed). This is what makes a crash mid-workflow recoverable and what lets a node pause indefinitely for a human decision instead of blocking a thread.
+
+### ExecutionStore
+
+```rust
+pub struct ExecutionStore { /* Arc<Mutex<Connection>> */ }
+
+impl ExecutionStore {
+    pub fn open(path: &str) -> Result<Self, AetherError>;
+
+    pub async fn create_execution(&self, workflow_id: &str, workflow_spec: &str, initial_payload: &str, node_ids: &[String]) -> Result<(), AetherError>;
+    pub async fn load_execution(&self, workflow_id: &str) -> Result<Option<(ExecutionRecord, Vec<ExecutionNodeRecord>)>, AetherError>;
+    pub async fn list_active(&self) -> Result<Vec<ExecutionRecord>, AetherError>; // status IN (running, suspended)
+
+    pub async fn mark_node_running(&self, workflow_id: &str, node_id: &str) -> Result<(), AetherError>;
+    pub async fn complete_node(&self, workflow_id: &str, node_id: &str, output_json: &str) -> Result<(), AetherError>;
+    pub async fn park_node(&self, workflow_id: &str, node_id: &str, session_id: &str, approval_id: &str, kind: &str, prompt: &str, gate_deadline: Option<&str>) -> Result<(), AetherError>;
+    pub async fn finish_execution(&self, workflow_id: &str, status: ExecutionStatus, result: Option<&str>, error: Option<&str>) -> Result<(), AetherError>;
+
+    pub async fn expire_gates(&self, now_rfc3339: &str) -> Result<Vec<(String, String)>, AetherError>;
+
+    pub async fn claim_execution(&self, workflow_id: &str, driver: &str, now_rfc3339: &str, lease_expiry_rfc3339: &str) -> Result<bool, AetherError>;
+    pub async fn renew_lease(&self, workflow_id: &str, driver: &str, lease_expiry_rfc3339: &str) -> Result<(), AetherError>;
+    pub async fn release_execution(&self, workflow_id: &str, driver: &str) -> Result<(), AetherError>;
+}
+```
+
+`ExecutionStatus` is `Running` / `Suspended` / `Succeeded` / `Failed`. `NodeStatus` is `Pending` / `Running` / `Done` / `Suspended` / `Failed`. An `ExecutionNodeRecord` carries `output` once done, and `session_id` / `approval_id` / `kind` / `prompt` / `gate_deadline` while parked — all cleared again by `complete_node`.
+
+### Suspension
+
+An agent that needs a human decision replies with `EnvelopeKind::Suspended` and a `SuspendPayload` (`aether-core/src/resume.rs`):
+
+```rust
+pub struct SuspendPayload {
+    pub session_id: String,
+    pub approval_id: String,
+    pub kind: String,
+    pub prompt: String,
+    pub gate_deadline: Option<String>, // absolute RFC3339; overrides the node default
+}
+```
+
+`Supervisor`'s drive loop sees the `Suspended` kind, calls `ExecutionStore::park_node`, emits `SupervisorEvent::NodeSuspended`, and does **not** fire that node's outgoing edges. If every currently-dispatched node is now done or parked and at least one is parked, the whole execution finishes as `Outcome::Suspended { workflow_id }`.
+
+### Gate deadlines
+
+A parked node's effective deadline is: the agent's `SuspendPayload.gate_deadline` if present (normalized to UTC), else `AgentNode::gate_deadline_secs` (seconds from park time) if the node was registered with one, else no deadline. Nothing expires a deadline on a timer — call `ExecutionStore::expire_gates(now)` (or `Orchestrator::expire_gates()`) to fail every suspended node whose deadline has passed, along with its execution. This is meant to be operator-triggered (CLI subcommand or MCP tool), not scheduled inside the process.
+
+### Resuming
+
+```rust
+pub enum ApprovalDecision {
+    Approved,
+    Rejected { reason: Option<String> },
+    Modified { payload: Value },
+}
+
+pub struct ResumeRequest {
+    pub session_id: String,
+    pub approval_id: String,
+    pub decision: ApprovalDecision,
+}
+```
+
+```rust
+let outcome = supervisor
+    .resume_execution(workflow_id, &workflow, "gate-node", ApprovalDecision::Approved)
+    .await;
+```
+
+`Supervisor::resume_execution` loads the parked node's `session_id`/`approval_id` from the store, POSTs a `ResumeRequest` to the agent via `Transport::resume` (`HttpTransport` hits `/aether/resume`), then either re-parks (the agent suspended again), fails, or checkpoints the completion and continues driving downstream nodes — exactly like a normal `drive()` continuation.
+
+### Crash recovery
+
+```rust
+pub async fn recover(&self, workflow: &Workflow, workflow_id: Uuid) -> Outcome; // on Supervisor
+```
+
+`Supervisor::recover` re-derives which nodes are ready (deps all `Done`, node itself `Pending`/`Running`) from the persisted snapshot and resumes the BFS drive loop — nodes already `Done` are never re-run, and nodes still `Suspended` stay parked. `Orchestrator::recoverable()` / `Orchestrator::recover(workflow_id)` wrap this at the goal level: they re-resolve the execution's persisted `DagSpec` against the *current* live registry (so a restarted agent on a new URL still resolves) before calling `Supervisor::recover`. Recovery is always something an operator triggers after inspecting `recoverable()` — nothing calls it automatically on startup.
+
+### Driver lease (multi-driver safety)
+
+Every `Supervisor` has a random `driver_id` (a UUID). Before driving an execution (`run`, `resume_execution`, `recover`) it calls `ExecutionStore::claim_execution`, which succeeds only if the row is unclaimed, already held by this driver, or the existing lease has expired (`lease_expiry < now`) — otherwise the caller gets `Outcome::Failed` with `"already being driven by another driver"`. The lease (`LEASE_SECS = 300`) is renewed at the top of every BFS level and released when the run stops (success, failure, or suspend). This means two `Supervisor` instances (e.g. two processes recovering from the same `ExecutionStore`) can never race the same workflow; a crashed driver's lease simply lapses after 5 minutes and becomes reclaimable.
 
 ---
 
@@ -540,6 +651,7 @@ registry.register(AgentNode {
         ("model".to_string(),    "your-model".to_string()),
         ("provider".to_string(), "openai".to_string()),
     ]),
+    gate_deadline_secs: None,
 });
 ```
 
@@ -575,6 +687,16 @@ cargo test -p aether-core --test integration
 ```
 
 The integration tests cover: single-node workflow, two-node chain, fan-out/fan-in, conditional routing, and event stream.
+
+### Orchestrator integration tests
+
+`aether-core/tests/orchestrator.rs` exercises `Orchestrator::submit` end-to-end against a real `RegistryStore` and `ExecutionStore` (temp SQLite files, not `:memory:`, so recovery scenarios can drop and reopen the same DB) and an inline echo agent:
+
+```bash
+cargo test -p aether-core --test orchestrator
+```
+
+The `examples/llm-planner` crate also has `tests/suspend_resume_e2e.rs`, an end-to-end test of the suspend → approve → resume path through a real HITL-gated agent.
 
 ### Dashboard integration tests
 
@@ -690,13 +812,22 @@ Every `Envelope` carries `trace_id` and `workflow_id` in metadata. Aether sets t
 - Ensure the agent exposes `GET /health` returning a 2xx status
 - Check `AETHER_POLL_INTERVAL_SECS` to reduce the delay
 
+**A run stays `Suspended` forever:**
+- Nothing expires a gate automatically — call `Orchestrator::expire_gates()` / the `expire_gates` MCP tool / `aether-mcp expire-gates` to fail nodes past their deadline
+- `Orchestrator::suspended_node(workflow_id)` returns the parked node's id; deliver a decision with `resume_execution`
+- Check whether the node was registered with `gate_deadline_secs` at all — with no default and no agent-supplied `gate_deadline`, a park never expires
+
+**`recover` / `resume_execution` returns "already being driven by another driver":**
+- The execution's row is claimed by a live lease (`ExecutionStore::claim_execution`) held by another `Supervisor` — only call `recover` on orphaned rows (`Orchestrator::recoverable()` with no active driver in this process)
+- A crashed driver's lease lapses after `LEASE_SECS` (300s); wait it out or confirm no other process actually holds the run
+
 ---
 
 ## LLM Planning & Orchestration
 
 ### Overview
 
-Aether can turn a natural-language goal into a workflow at run time. A planner agent (registered like any other agent with the capability `"plan"`) receives the goal and emits a DAG as JSON. Aether validates the DAG, resolves each node to a healthy agent from the SQLite registry, builds a `Workflow`, and executes it on the `Supervisor`.
+Aether can turn a natural-language goal into a workflow at run time. A planner agent (registered like any other agent with the capability `"plan"`) receives the goal and emits a DAG as JSON. Aether validates the DAG, resolves each node to a healthy agent from the SQLite registry, builds a `Workflow`, and executes it on the `Supervisor`. `DagSpec::json_schema()` returns the schema (via `schemars`) as a `serde_json::Value`, suitable for use as a structured-output schema for the planner LLM.
 
 ### DAG JSON Schema
 
@@ -710,6 +841,7 @@ The planner contract is `DagSpec`, a JSON object with a `nodes` array. Each node
 | `depends_on` | `string[]` | Yes | IDs of upstream nodes; empty = entry node. A node no other node depends on is a terminal node |
 | `instruction` | `string` | No | Planner's per-node directive, carried into the Envelope metadata |
 | `metadata` | `object` | No | Flat `{ key: value }` string map for extra per-node configuration |
+| `gate_deadline_secs` | `number` | No | Default gate deadline for this node (seconds from park time); see [Durable Execution, Suspension & Recovery](#durable-execution-suspension--recovery) |
 
 `*` — exactly one of `capability` or `agent` must be set.
 
@@ -736,36 +868,51 @@ Validation rules enforced by `DagSpec::validate()`:
 
 ### Orchestrator
 
-`Orchestrator` (in `aether-core`) is the LLM-free coordinator:
+`Orchestrator` (in `aether-core`) is the LLM-free coordinator. It holds both a `RegistryStore` (live agent instances) and an `ExecutionStore` (durable checkpoints) so goal runs survive a restart:
 
 1. **Resolves the planner** — queries the `RegistryStore` for a healthy agent with capability `"plan"`.
 2. **Dispatches the goal** — sends an `Envelope::invoke(goal)` over HTTP.
 3. **Parses the DAG** — deserializes the planner's response as a `DagSpec`.
 4. **Bridges the registry** — resolves each DAG node to a healthy instance (capability lookup or agent pin) and registers it as an executable `AgentNode`.
-5. **Builds and runs** — constructs a `Workflow` whose edges mirror `depends_on`, then calls `Supervisor::run()`.
+5. **Builds and runs** — constructs a `Workflow` whose edges mirror `depends_on`, persists the full `DagSpec` (not just entries+edges, so a crashed run can be re-resolved later), then calls `Supervisor::run_with_id_spec()`.
 
 ```rust
 let store = RegistryStore::open("aether.db")?;
-let orch = Orchestrator::new(store);
+let execution_store = ExecutionStore::open("aether-executions.db")?;
+let orch = Orchestrator::new(store, execution_store);
 let outcome = orch.submit(serde_json::json!({ "goal": "analyze X" })).await;
-// Outcome::Success or Outcome::Failed — never panics
+// Outcome::Success, Outcome::Failed, or Outcome::Suspended — never panics
 ```
 
 Pre-execution failures (no planner found, bad DAG JSON, missing capability, cycle) return `Outcome::Failed`. The `instruction` metadata from each `DagNode` is forwarded into the outbound `Envelope` metadata so the worker agent receives the planner's directive.
 
+**Beyond `submit`**, `Orchestrator` exposes the operator-facing durable-execution API (see [Durable Execution, Suspension & Recovery](#durable-execution-suspension--recovery)):
+
+| Method | Purpose |
+|--------|---------|
+| `recoverable() -> Vec<ExecutionRecord>` | Executions still `running`/`suspended` — candidates for recovery |
+| `recover(workflow_id) -> Outcome` | Re-resolve the persisted DAG against the live registry and continue a crash/restart orphan |
+| `suspended_node(workflow_id) -> Option<String>` | The id of the node currently parked awaiting approval, if any |
+| `resume_execution(workflow_id, node, decision) -> Outcome` | Deliver an `ApprovalDecision` to a parked node and re-drive |
+| `expire_gates() -> Vec<(String, String)>` | Fail every parked node past its gate deadline; returns the `(workflow_id, node_id)` pairs |
+| `list_capabilities() -> Vec<String>` | Sorted, de-duplicated capabilities advertised by healthy instances |
+
 ### aether-mcp
 
-The `aether-mcp` crate exposes goal dispatch over MCP (Model Context Protocol) as a JSON-RPC 2.0 server. It supports two transports:
+The `aether-mcp` crate exposes goal dispatch and recovery operations over MCP (Model Context Protocol) as a JSON-RPC 2.0 server. It supports two transports:
 
 **stdio** (default): reads one JSON-RPC request per line from stdin, writes responses to stdout. Notifications (requests without an `id`) produce no output.
 
 **HTTP** (MCP Streamable HTTP): POST a JSON-RPC request to `/` (port `7800` by default) and receive a JSON response. Notifications return `202 Accepted` with no body; a malformed body returns a JSON-RPC `-32700` parse error. The server initiates no messages, so `GET /` (the optional server→client SSE channel) returns `405 Method Not Allowed`.
+
+It also has a one-shot CLI subcommand that bypasses the JSON-RPC server entirely: `aether-mcp expire-gates` runs a single gate sweep, prints the expired `(workflow_id, node_id)` pairs as JSON, and exits.
 
 **Environment variables:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AETHER_DB_PATH` | `aether.db` | SQLite database for the agent registry |
+| `AETHER_EXEC_DB_PATH` | `aether-executions.db` | SQLite database for the durable execution store |
 | `AETHER_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `AETHER_MCP_PORT` | `7800` | TCP port (only used when `AETHER_MCP_TRANSPORT=http`) |
 
@@ -776,8 +923,11 @@ The `aether-mcp` crate exposes goal dispatch over MCP (Model Context Protocol) a
 | `submit_goal` | Submit a goal; returns a `workflow_id` to poll | `{ "goal": "analyze X" }` |
 | `get_result` | Get status/result of a submitted goal | `{ "workflow_id": "<uuid>" }` |
 | `list_capabilities` | List healthy agent capabilities | `{}` |
+| `expire_gates` | Operator sweep: fail every parked node past its gate deadline | `{}` |
+| `list_recoverable` | List executions (running/suspended) an operator may recover after a restart | `{}` |
+| `recover_workflow` | Recover one execution by `workflow_id` (re-drives a crash/restart orphan); refused if a live driver holds it | `{ "workflow_id": "<uuid>" }` |
 
-`submit_goal` is async — it spawns the orchestrator run in the background and returns immediately. Poll with `get_result` until `JobState::Done` is returned.
+`submit_goal` is async — it spawns the orchestrator run in the background and returns immediately. Poll with `get_result` until `JobState::Done` is returned. There is no `resume_workflow` MCP tool yet — deliver an approval decision via `Orchestrator::resume_execution` directly (e.g. from a driver process like `examples/llm-planner`), not through `aether-mcp`.
 
 **Quick Reference** (continued below)
 
@@ -791,43 +941,51 @@ The `aether-mcp` crate exposes goal dispatch over MCP (Model Context Protocol) a
 |----------|-----------|-------------|
 | `RUST_LOG` | all | Logging level (`info`, `debug`, `trace`) |
 | `AETHER_PORT` | `aether` binary | Registry server port (default: `7070`) |
-| `AETHER_DB_PATH` | `aether` binary | SQLite database file path (default: `aether.db`) |
+| `AETHER_DB_PATH` | `aether` binary, `aether-mcp` | SQLite database file path (default: `aether.db`) |
 | `AETHER_POLL_INTERVAL_SECS` | `aether` binary | Health poll interval in seconds (default: `30`) |
+| `AETHER_EXEC_DB_PATH` | `aether-mcp` | SQLite database for the durable execution store (default: `aether-executions.db`) |
 | `AETHER_MCP_TRANSPORT` | `aether-mcp` | Transport: `stdio` or `http` (default: `stdio`) |
 | `AETHER_MCP_PORT` | `aether-mcp` | TCP port for HTTP transport (default: `7800`) |
 | `ANALYST_URL` | pipeline example | HTTP URL of the analyst agent |
 | `WRITER_URL` | pipeline example | HTTP URL of the writer agent |
+| `MODEL_BASE_URL` | llm-planner example | OpenAI-compatible base URL for the local model server (default: `http://localhost:9090/v1`) |
+| `MODEL_API_KEY` / `MODEL_NAME` | llm-planner example | Model credentials / model name for the planner + worker agents |
 
 ### Key types at a glance
 
 | Type | Crate | Purpose |
 |------|-------|---------|
 | `Envelope` | `aether-core` | Unit of communication — id, kind, payload, metadata |
-| `EnvelopeKind` | `aether-core` | Invoke / Result / Error / Ping / Pong |
-| `Transport` | `aether-core` | Trait: `send(Envelope) → Envelope` |
+| `EnvelopeKind` | `aether-core` | Invoke / Result / Error / Suspended |
+| `Transport` | `aether-core` | Trait: `send(Envelope) → Envelope`, `resume(ResumeRequest) → Envelope` |
 | `AgentFactory` | `aether-core` | Trait: `create() → Arc<dyn Transport>` |
-| `HttpTransport` | `aether-core` | POST `/aether/invoke`; `reqwest`-based HTTP round-trip |
+| `HttpTransport` | `aether-core` | POST `/aether/invoke`, `/aether/resume`; `reqwest`-based HTTP round-trip |
 | `HttpAgentFactory` | `aether-core` | Creates `HttpTransport` instances pointing at a URL |
-| `AgentNode` | `aether-core` | Definition: name, factory, spawn policy, failure policy, timeout |
+| `AgentNode` | `aether-core` | Definition: name, factory, spawn policy, failure policy, timeout, `gate_deadline_secs` |
 | `AgentRegistry` | `aether-core` | `register`, `get`, `find_capable`, `list` |
 | `SpawnPolicy` | `aether-core` | PerRequest / Singleton / Pool |
 | `FailurePolicy` | `aether-core` | retries, restart_on_failure, fallback |
 | `Workflow` | `aether-core` | Immutable DAG of edges; built via `WorkflowBuilder` |
-| `WorkflowBuilder` | `aether-core` | `edge`, `conditional`, `capability_router`, `build` |
-| `Supervisor` | `aether-core` | `new(registry)`, `run(&workflow, payload)`, `watch()`, `registry()` |
-| `SupervisorEvent` | `aether-core` | WorkflowStarted/Finished, TaskDispatched/Completed/Failed, AgentRestarted/HealthCheck |
-| `Outcome` | `aether-core` | Success(Value) / Failed { node, error } / Timeout { node } |
+| `WorkflowBuilder` | `aether-core` | `entry`, `edge`, `conditional`, `capability_router`, `build` |
+| `Supervisor` | `aether-core` | `with_store(registry, store)`, `run`/`run_with_id`, `resume_execution`, `recover`, `watch()`, `registry()`, `store()` |
+| `SupervisorEvent` | `aether-core` | WorkflowStarted/Finished, TaskDispatched/Completed/Failed, AgentRestarted/HealthCheck, NodeSuspended |
+| `Outcome` | `aether-core` | Success(Value) / Failed { node, error } / Timeout { node } / Suspended { workflow_id } |
 | `AetherError` | `aether-core` | AgentFailed / AgentTimeout / TransportError / RegistryError / WorkflowError |
 | `RegistryStore` | `aether-core` | SQLite-backed agent instance persistence |
 | `RegistrationEntry` | `aether-core` | One registered instance: name, http_url, capabilities, status |
 | `RegistryStatus` | `aether-core` | Unknown / Healthy / Unhealthy |
 | `HealthPoller` | `aether-core` | Background `GET /health` checker with failure threshold |
-| `DagSpec` | `aether-core` | Planned DAG: `nodes: Vec<DagNode>` |
-| `DagNode` | `aether-core` | Single DAG node: `id`, `capability`, `agent`, `depends_on`, `instruction`, `metadata` |
-| `Orchestrator` | `aether-core` | `new(store)`, `submit(goal)`, `list_capabilities()` |
+| `ExecutionStore` | `aether-core` | SQLite-backed durable checkpoints; gate expiry; driver claim/lease/release |
+| `ExecutionRecord` / `ExecutionNodeRecord` | `aether-core` | Persisted execution / per-node checkpoint rows |
+| `ExecutionStatus` / `NodeStatus` | `aether-core` | Running/Suspended/Succeeded/Failed; Pending/Running/Done/Suspended/Failed |
+| `SuspendPayload` | `aether-core` | Agent → Aether: session_id, approval_id, kind, prompt, optional gate_deadline |
+| `ApprovalDecision` / `ResumeRequest` | `aether-core` | Human decision + envelope to deliver it to a parked agent |
+| `DagSpec` | `aether-core` | Planned DAG: `nodes: Vec<DagNode>`; `json_schema()` |
+| `DagNode` | `aether-core` | Single DAG node: `id`, `capability`, `agent`, `depends_on`, `instruction`, `metadata`, `gate_deadline_secs` |
+| `Orchestrator` | `aether-core` | `new(store, execution_store)`, `submit`, `recover`, `recoverable`, `resume_execution`, `expire_gates`, `list_capabilities` |
 | `JobState` | `aether-mcp` | `Running` / `Done { result: Outcome }` |
 | `JobStore` | `aether-mcp` | `new()`, `create()`, `complete()`, `get()` |
-| `McpEngine` | `aether-mcp` | `new(orchestrator)`, `submit_goal()`, `get_result()`, `list_capabilities()` |
+| `McpEngine` | `aether-mcp` | `new(orchestrator)`, `submit_goal`, `get_result`, `list_capabilities`, `expire_gates`, `recoverable`, `recover` |
 | `AppState` | `aether-dashboard` | Holds Supervisor + TokenAccumulator + active workflow map |
 | `DashboardConfig` | `aether-dashboard` | `port: u16`, `auth_token: Option<String>` |
 
@@ -848,6 +1006,7 @@ Workflow::builder(&registry)
 ```bash
 cargo test --workspace                           # all tests
 cargo test -p aether-core --test integration     # end-to-end with inline HTTP servers
+cargo test -p aether-core --test orchestrator    # end-to-end submit/recover through a real ExecutionStore
 cargo test -p aether-dashboard --test server_test # dashboard HTTP tests
 cargo test -p aether-mcp                         # MCP crate tests
 cargo clippy --workspace -- -D warnings          # lint
@@ -855,4 +1014,5 @@ cargo fmt --all                                  # format
 cargo build -p aether-core                       # builds echo-agent + aether binaries
 cargo build -p aether-mcp --bin aether-mcp       # build MCP binary
 cargo run -p aether-core --bin aether            # start the registry server
+cargo run -p aether-mcp --bin aether-mcp -- expire-gates  # one-shot gate-expiry sweep
 ```
