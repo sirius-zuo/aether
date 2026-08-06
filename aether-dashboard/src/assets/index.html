@@ -15,6 +15,15 @@
     header h1 { font-size: 1.2rem; font-weight: 700; }
     .badge { font-size: 0.7rem; background: #30d158; color: #fff;
              padding: 0.2rem 0.5rem; border-radius: 4px; }
+    .approval-card { border: 1px solid #ff9f0a; border-radius: 8px; padding: 0.85rem;
+                      margin-bottom: 0.75rem; background: #fff8ec; }
+    .approval-card .meta { font-size: 0.8rem; color: #6e6e73; margin-bottom: 0.5rem; }
+    .approval-card .prompt { font-size: 0.9rem; margin-bottom: 0.6rem; white-space: pre-wrap; }
+    .approval-card button { font-size: 0.8rem; padding: 0.35rem 0.7rem; border-radius: 6px;
+                             border: none; margin-right: 0.4rem; cursor: pointer; }
+    .btn-approve { background: #30d158; color: #fff; }
+    .btn-reject { background: #ff3b30; color: #fff; }
+    .auto-toggle { float: right; font-size: 0.75rem; }
     main { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;
            padding: 1.5rem 2rem; }
     .panel { background: #fff; border: 1px solid #e5e5ea; border-radius: 12px;
@@ -42,6 +51,7 @@
 <header>
   <h1>Aether Dashboard</h1>
   <span class="badge" id="conn-status">connecting...</span>
+  <span class="badge" id="stats-bar" style="background:#8e8e93;">0 nodes · 0 human interventions</span>
 </header>
 <main>
   <div class="panel">
@@ -52,6 +62,10 @@
       </tr></thead>
       <tbody id="agents-tbody"></tbody>
     </table>
+  </div>
+  <div class="panel full-width" id="approvals-panel" style="display:none;">
+    <h2>Pending Approvals</h2>
+    <div id="approvals-list"></div>
   </div>
   <div class="panel">
     <h2>Active Workflows</h2>
@@ -149,6 +163,93 @@
 
   document.getElementById('wf-select').addEventListener('change', e => loadDag(e.target.value));
 
+  // --- Approvals panel ---
+  const pendingApprovals = new Map();
+  const autoApprove = new Set();
+  const stats = { nodes: 0, interventions: 0 };
+
+  function updateStatsBar() {
+    document.getElementById('stats-bar').textContent =
+      stats.nodes + ' nodes · ' + stats.interventions + ' human interventions';
+  }
+
+  async function sendDecision(workflowId, nodeId, decision) {
+    await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId, decision }),
+    });
+    pendingApprovals.delete(workflowId + ':' + nodeId);
+    stats.interventions += 1;
+    updateStatsBar();
+    renderApprovals();
+  }
+
+  function renderApprovals() {
+    const panel = document.getElementById('approvals-panel');
+    const list = document.getElementById('approvals-list');
+    while (list.firstChild) list.removeChild(list.firstChild);
+
+    if (pendingApprovals.size === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+
+    pendingApprovals.forEach((data, key) => {
+      const card = document.createElement('div');
+      card.className = 'approval-card';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = 'Node: ' + data.node + '  ·  Kind: ' + data.kind + '  ·  Workflow: ' + data.workflow_id.slice(0, 8) + '…';
+      card.appendChild(meta);
+
+      const prompt = document.createElement('div');
+      prompt.className = 'prompt';
+      prompt.textContent = data.prompt;
+      card.appendChild(prompt);
+
+      const toggleLabel = document.createElement('label');
+      toggleLabel.className = 'auto-toggle';
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.checked = autoApprove.has(data.node);
+      toggle.addEventListener('change', () => {
+        if (toggle.checked) autoApprove.add(data.node); else autoApprove.delete(data.node);
+      });
+      toggleLabel.appendChild(toggle);
+      toggleLabel.appendChild(document.createTextNode(' auto-approve this node'));
+      card.appendChild(toggleLabel);
+
+      const approveBtn = document.createElement('button');
+      approveBtn.className = 'btn-approve';
+      approveBtn.textContent = 'Approve';
+      approveBtn.addEventListener('click', () =>
+        sendDecision(data.workflow_id, data.node, { type: 'approved' }));
+      card.appendChild(approveBtn);
+
+      const rejectBtn = document.createElement('button');
+      rejectBtn.className = 'btn-reject';
+      rejectBtn.textContent = 'Reject';
+      rejectBtn.addEventListener('click', () =>
+        sendDecision(data.workflow_id, data.node, { type: 'rejected', reason: 'rejected from dashboard' }));
+      card.appendChild(rejectBtn);
+
+      list.appendChild(card);
+    });
+  }
+
+  function handleNodeSuspended(d) {
+    const key = d.workflow_id + ':' + d.node;
+    if (autoApprove.has(d.node)) {
+      sendDecision(d.workflow_id, d.node, { type: 'approved' });
+      return;
+    }
+    pendingApprovals.set(key, d);
+    renderApprovals();
+  }
+
   // --- Event log ---
   const logEl = document.getElementById('event-log');
 
@@ -195,6 +296,13 @@
             refreshWorkflows(Object.values(workflowState));
           }
           refreshAgents();
+        }
+        if (event.NodeSuspended) {
+          handleNodeSuspended(event.NodeSuspended);
+        }
+        if (event.TaskDispatched) {
+          stats.nodes += 1;
+          updateStatsBar();
         }
       } catch (_) { /* non-JSON SSE keepalive — ignore */ }
     };

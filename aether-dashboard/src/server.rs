@@ -6,10 +6,10 @@ use axum::{
     http::StatusCode,
     middleware,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -90,6 +90,7 @@ pub async fn start(
         .route("/api/agents", get(agents_handler))
         .route("/api/workflows", get(workflows_handler))
         .route("/api/workflows/:id/graph", get(workflow_graph_handler))
+        .route("/api/workflows/:id/resume", post(resume_handler))
         .with_state(Arc::clone(&state))
         .layer(middleware::from_fn(move |req, next| {
             check_auth(req, next, auth.clone())
@@ -193,6 +194,34 @@ async fn workflow_graph_handler(
         .get(&id)
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Deserialize)]
+struct ResumeBody {
+    node_id: String,
+    decision: aether_core::ApprovalDecision,
+}
+
+async fn resume_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResumeBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let workflow = state.get_workflow(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let workflow_id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let outcome = state
+        .supervisor
+        .resume_execution(workflow_id, &workflow, &body.node_id, body.decision)
+        .await;
+
+    let outcome_str = match &outcome {
+        Outcome::Success(_) => "success",
+        Outcome::Suspended { .. } => "suspended",
+        Outcome::Failed { .. } => "failed",
+        Outcome::Timeout { .. } => "timeout",
+    };
+    Ok(Json(serde_json::json!({ "outcome": outcome_str })))
 }
 
 #[cfg(test)]
